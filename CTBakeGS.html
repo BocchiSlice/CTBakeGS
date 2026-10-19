@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>CT → 3D Gaussian Splatting</title>
-<script>window.__DEMO = 1; document.documentElement.classList.add('demo');</script>
+<script>window.__DEMO = 1; document.documentElement.classList.add('demo'); try { indexedDB.deleteDatabase('ct3dgs-recover'); localStorage.removeItem('bs.lostDown'); } catch (e) { /* */ }</script>
 <style>
 
 </style>
@@ -1775,6 +1775,11 @@ html.demo #viewResetWrap {left: auto !important; right: 16px !important; bottom:
   background: rgba(20, 21, 26, 0.86); color: #ecebe8; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px;
   font: 12.5px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 6px 14px; pointer-events: none; text-align: center;}
 #dmStatus:empty {display: none;}
+#dmStatus.wait {overflow: hidden;}
+#dmStatus.wait::after {/* indeterminate bar: the time of GPU preparation is not known in advance */
+  content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 30%;
+  background: #8fb3ff; animation: dmWait 1.4s ease-in-out infinite;}
+@keyframes dmWait { from { left: -30%; } to { left: 100%; } }
 #dmHint {position: fixed; z-index: 58; inset: 0; display: grid; place-items: center; pointer-events: none;
   color: #a3a29d; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 0 24px 0 370px;}
 #dmHint b {display: block; color: #ecebe8; font-size: 20px; margin-bottom: 4px;}
@@ -4949,6 +4954,7 @@ function compile(type, src) {
   return s;
 }
 function program(vs, fs) {
+  if (window.__DEMO) fs = fs.replace('#define MAXL 10', '#define MAXL 1');
   const p = gl.createProgram();
   gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
   gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
@@ -4961,10 +4967,11 @@ function program(vs, fs) {
 let rayProg, blitProg, rayProgND = null, rayProgLV = null, rayProgFull = null;
 const pscExt = gl.getExtension('KHR_parallel_shader_compile');
 function programLazy(vs, fs) {
+  if (window.__DEMO) fs = fs.replace('#define MAXL 10', '#define MAXL 1');
   const p = gl.createProgram(), sh = [];
   for (const [ty, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) { const s = gl.createShader(ty); gl.shaderSource(s, src); gl.compileShader(s); gl.attachShader(p, s); sh.push(s); }
   gl.linkProgram(p);
-  p.pending = true; p.sh = sh;
+  p.pending = true; p.sh = sh; p.t0 = performance.now();
   const cache = {};
   p.u = (name) => (name in cache ? cache[name] : (cache[name] = gl.getUniformLocation(p, name)));
   return p;
@@ -5012,14 +5019,14 @@ const Q3D_PRESETS = {
 };
 const Q3D = (() => { let k = null, u = null;
   try { u = new URLSearchParams(location.search).get('q3d'); } catch (_) { /* */ }
-  try { k = localStorage.getItem('bs.q3d'); } catch (_) { /* */ }
+  if (!window.__DEMO) try { k = localStorage.getItem('bs.q3d'); } catch (_) { /* */ }
 
   const ua = navigator.userAgent || '', phone = /iPhone|iPad|iPod|Android/i.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
   const def = /OculusBrowser|Quest/i.test(ua) ? 'light' : phone ? 'normal' : 'best';
   const key = Q3D_PRESETS[u] ? u : Q3D_PRESETS[k] ? k : def;
   return { key, url: !!Q3D_PRESETS[u] }; })();
 const q3dP = () => Q3D_PRESETS[Q3D.key] || Q3D_PRESETS.best;
-try { const d = localStorage.getItem('bs.lostDown'); if (d) { localStorage.removeItem('bs.lostDown'); setTimeout(() => { try { histToast(I18N.t('前回3D表示が止まったので、3Dの重さを「{0}」にしました（設定で戻せます）').replace('{0}', I18N.t(Q3D_NAMES[d] || d)), 7000); } catch (e) { /* */ } }, 2500); } } catch (e) { /* */ }
+if (!window.__DEMO) try { const d = localStorage.getItem('bs.lostDown'); if (d) { localStorage.removeItem('bs.lostDown'); setTimeout(() => { try { histToast(I18N.t('前回3D表示が止まったので、3Dの重さを「{0}」にしました（設定で戻せます）').replace('{0}', I18N.t(Q3D_NAMES[d] || d)), 7000); } catch (e) { /* */ } }, 2500); } } catch (e) { /* */ }
 function q3dStepK(hq) {
   const qp = q3dP(), cap = qp.cap;
   if (!cap || !volume || !volume.dims) return qp.step;
@@ -5060,7 +5067,7 @@ function setQ3D(k) {
   if (!Q3D_PRESETS[k]) return;
   const same = k === Q3D.key;
   Q3D.key = k; Q3D.url = false;
-  try { localStorage.setItem('bs.q3d', k); } catch (_) { /* */ }
+  if (!window.__DEMO) try { localStorage.setItem('bs.q3d', k); } catch (_) { /* */ }
   if ($('q3dSel') && $('q3dSel').value !== k) $('q3dSel').value = k;
   if (same) return;
   rayProgND = null; rayProgLV = null; rayProgFull = null;
@@ -5134,6 +5141,12 @@ canvas.addEventListener('webglcontextlost', (ev) => {
   ev.preventDefault();
   console.error('WebGL context lost');
   if (glLost) return; glLost = true;
+  if (window.__DEMO) {
+    const box = document.createElement('div'); box.className = 'drop-ask'; box.setAttribute('role', 'dialog');
+    box.innerHTML = '<div class="da-card"><b>The GPU stopped (WebGL context lost)</b><p>This can happen when a conversion uses more graphics memory than the computer has. Please reload the page; if it happens again, try fewer splats.</p><div class="btnrow"><button type="button" class="btn primary">Reload</button></div></div>';
+    box.querySelector('button').addEventListener('click', () => location.reload());
+    document.body.appendChild(box); return;
+  }
   const box = document.createElement('div'); box.className = 'drop-ask'; box.setAttribute('role', 'dialog');
   box.innerHTML = '<div class="da-card"><b>3D表示（WebGL）が止まりました</b><p>GPUのメモリ不足やドライバの都合で起こります。今の作業（CT・3Dモデル・測定・ショットなど）をこのブラウザの中に一時保存して、読み込み直したあとに元に戻します。</p><div class="btnrow"><button type="button" class="btn primary" data-v="1">復旧する</button><button type="button" class="btn" data-v="">あとで</button></div></div>';
   box.querySelector('[data-v="1"]').addEventListener('click', () => { box.remove(); glLostRecover(); });
@@ -8401,7 +8414,7 @@ async function prBench() {
     res.push([label, fps]);
     cam.yaw = keep.yaw;
   };
-  const spl = models.find((o) => o.kind === 'splat' && o.visible && /_3dgs/.test(o.name || ''));
+  const spl = models.find((o) => o.kind === 'splat' && (window.__DEMO || (o.visible && /_3dgs/.test(o.name || ''))));
   try {
     showBusy(I18N.t('速さを測っています…')); await tick();
     await run(I18N.t('ふつう'), () => { pr.on = false; view.ctHide = keep.ctHide; if (spl) spl.visible = false; });
@@ -10729,15 +10742,29 @@ if (window.__DEMO) (() => {
 
   { const orig = setVolume; setVolume = async function (ds) { const r = await orig.apply(this, arguments); try { if (has() && volume !== D.vol) { onLoaded(); window.__dmLoadedAt = performance.now(); } } catch (e) { console.error(e); } return r; }; }
   try { vrApplyPreset('dvrBone'); } catch (e) {  }
+  // start compiling the photoreal program in the background as soon as the 3D program is built (before a CT is opened)
+  const lvWarm = setInterval(() => {
+    try {
+      if (rayProgLV || lv.fail || !pscExt) { clearInterval(lvWarm); return; }
+      if (rayProg && rayProg.pending && !gl.getProgramParameter(rayProg, pscExt.COMPLETION_STATUS_KHR)) return;
+      rayProgLV = programLazy(VS, raySrc(rayLevel).replace('#define MAXL 10', '#define LV\n#define MAXL 10'));
+    } catch (e) { console.warn(e); }
+    clearInterval(lvWarm);
+  }, 500);
   setInterval(() => {
     if (has() && volume !== D.vol && $('busy').hidden) onLoaded();
     let t = '';
     if (has() && !D.busy && !prUI.busy) {
-      if (D.mode === 'photo') t = prInfoText();
+      if (D.mode === 'photo') {
+        // the photoreal program is large; on Windows (DirectX) compiling it the first time can take minutes
+        if (lvOk() && rayProgLV && rayProgLV.pending) t = `Preparing the renderer… ${Math.round((performance.now() - (rayProgLV.t0 || performance.now())) / 1000)} s (first time only; can take up to a few minutes)`;
+        else t = prInfoText();
+      }
       else if (D.mode === 'gs' && splatOn()) t = `3DGS · ${(D.splat.n || 0).toLocaleString('en-US')} splats · baked lighting (no light computation while viewing)`;
       else if (D.mode === 'std') t = 'Standard rendering';
     }
     if (status.textContent !== t) status.textContent = t;
+    status.classList.toggle('wait', /…/.test(t));
     sync();
   }, 300);
   sync();
