@@ -12,6 +12,9 @@ Everything runs locally in the browser in a single HTML file.
 Open `CTBakeGS.html` in a recent desktop Chrome or Edge, open a CT (DICOM or NIfTI), choose a look, and press
 *Convert to 3DGS*. Export `.ply` or `.spz`.
 
+On Windows, the first start can take about a minute while the browser prepares the GPU programs; later starts
+are fast.
+
 ## Reproducing the paper
 
 Open `CTBakeGS.html?study=1`, run the study on the six TotalSegmentator CTs, then run
