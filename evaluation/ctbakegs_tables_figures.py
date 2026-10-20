@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tables and Figure 2 of the CTBakeGS paper, from the output folder of the evaluation page.
+Tables 1-4, Figures 1-3 and Additional file 1 (Tables S1-S3; S1 cases, S2 comparisons, S3 thick slices) of the CTBakeGS paper, from the output folder of the evaluation page.
 
   python ctbakegs_tables_figures.py OUT_FOLDER [--desktop PERF_FOLDER] [--laptop PERF_FOLDER] [--results RESULTS_FOLDER]
 
@@ -8,7 +8,7 @@ OUT_FOLDER   folder written by "Run study" (for example out6), with summary.csv 
 --ct         optional: ct.nii.gz of case s0138, for the CT slice in Figure 1 (needs nibabel)
 --desktop    optional: "perf" folder written by "Measure speed only" on a desktop
 --laptop     optional: "perf" folder written by "Measure speed only" on an older laptop
-Writes CSV tables, figure2.png/.pdf and figureS1_ablation.png into RESULTS_FOLDER (default: OUT_FOLDER/paper_results).
+Writes table1-3 and tableS1-S3 (CSV) and figure1-3 (PNG, PDF, SVG, TIFF) into RESULTS_FOLDER (default: OUT_FOLDER/paper_results).
 Needs numpy, pandas, scipy, matplotlib and pillow.
 """
 import argparse, os
@@ -75,17 +75,22 @@ if PERF_LAPTOP and os.path.exists(os.path.join(PERF_LAPTOP, 'summary.csv')):
     rows.append({'': 'Conversion time, older laptop (s)', **{v: perf(SL, 'bake_s', v, fmt='{:.0f}') for v in ['1M', '2M', '3M']}})
 T2 = pd.DataFrame(rows); T2.to_csv(os.path.join(RESULTS, 'table2_performance.csv'), index=False); print('\n' + T2.to_string(index=False))
 
+# Table 3: per case, two million splats, PSNR (dB) / SSIM / LPIPS
 rows = []
-for c, n in CASES:
-    sj = json.load(open(os.path.join(OUT, c, 'dvrBone', 'scene.json')))
-    d = sj['ct']['dims']
-    t = SU[(SU.case == c) & (SU.variant == '2M')].bake_s.astype(float).mean()
-    rows.append({'Case': n, 'Identifier': c, 'Matrix (voxels)': ' × '.join(map(str, d)), 'Voxels (million)': round(d[0] * d[1] * d[2] / 1e6, 1),
-                 'Spacing (mm)': ' × '.join(f'{s:g}' for s in sj['ct']['spacingMm']), 'Conversion, one pass, 2 M (s)': round(t, 1)})
-TS1 = pd.DataFrame(rows); TS1.to_csv(os.path.join(RESULTS, 'tableS1_cases.csv'), index=False); print('\n' + TS1.to_string(index=False))
+for look, ln in LOOKS:
+    for kind, kn in [('wide', 'wide'), ('close', 'close-up')]:
+        rows.append({'Look': ln, 'Views': kn, **{f'Case {n}': f"{m(c, look, '2M', kind, 'psnr_mean'):.2f} / {m(c, look, '2M', kind, 'ssim_mean'):.3f} / {m(c, look, '2M', kind, 'lpips_vgg_mean'):.3f}" for c, n in CASES}})
+T3 = pd.DataFrame(rows); T3.to_csv(os.path.join(RESULTS, 'table3_per_case.csv'), index=False); print('\n' + T3.to_string(index=False))
+
+# Table 4: per case, two million splats, PSNR (dB) with / without faint splats
+rows = []
+for look, ln in LOOKS:
+    for kind, kn in [('wide', 'wide'), ('close', 'close-up')]:
+        rows.append({'Look': ln, 'Views': kn, **{f'Case {n}': f"{m(c, look, '2M', kind, 'psnr_mean'):.1f} / {m(c, look, 'noBoost', kind, 'psnr_mean'):.1f}" for c, n in CASES}})
+T4 = pd.DataFrame(rows); T4.to_csv(os.path.join(RESULTS, 'table4_faint_splats.csv'), index=False); print('\n' + T4.to_string(index=False))
 
 VARS = [('1M', '1 M splats', '2M'), ('3M', '3 M splats', '2M'), ('noAA', 'No anti-aliasing compensation', '2M'),
-        ('naiveOpacity', 'No opacity mapping', '2M'), ('uniformCells', 'Uniform grid (1 cell/voxel)', '2M'),
+        ('naiveOpacity', 'No opacity mapping', '2M'), ('noBoost', 'Without faint splats', '2M'), ('uniformCells', 'Uniform grid (1 cell/voxel)', '2M'),
         ('uniformCells', 'Uniform grid vs octree, equal count', 'adaptiveMatched')]
 rows = []
 for look, ln in LOOKS:
@@ -96,7 +101,20 @@ for look, ln in LOOKS:
                 d = [m(c, look, v, kind, col) - m(c, look, base, kind, col) for c in C]
                 r[lab] = f'{np.median(d):+.3f}'; r[lab + ' p'] = f'{p_exact(d):.3f}'
             rows.append(r)
-TS2 = pd.DataFrame(rows); TS2.to_csv(os.path.join(RESULTS, 'tableS2_comparisons.csv'), index=False); print('\n' + TS2.to_string(index=False))
+TS1 = pd.DataFrame(rows); TS1.to_csv(os.path.join(RESULTS, 'tableS2_comparisons.csv'), index=False); print('\n' + TS1.to_string(index=False))
+
+rows = []
+def _r(x, d):   # rounded value, or '' when the measurement is missing (e.g. a laptop run that is still incomplete)
+    return '' if x != x else (round(x, d) if d else int(round(x)))
+for c, n in CASES:
+    sj = json.load(open(os.path.join(OUT, c, 'dvrBone', 'scene.json')))
+    d = sj['ct']['dims']
+    t = SU[(SU.case == c) & (SU.variant == '2M')].bake_s.astype(float).mean()
+    rows.append({'Case': n, 'Identifier': c, 'Matrix (voxels)': ' × '.join(map(str, d)), 'Voxels (million)': round(d[0] * d[1] * d[2] / 1e6, 1),
+                 'Spacing (mm)': ' × '.join(f'{s:g}' for s in sj['ct']['spacingMm']), 'Conversion, one pass, 2 M, main computer (s)': round(t, 1),
+                 **({'Conversion, one pass, 2 M, desktop (s)': _r(SD[(SD.case == c) & (SD.variant == '2M')].bake_s.astype(float).mean(), 1)} if PERF_DESKTOP and os.path.exists(os.path.join(PERF_DESKTOP, 'summary.csv')) else {}),
+                 **({'Conversion, one pass, 2 M, older laptop (s)': _r(SL[(SL.case == c) & (SL.variant == '2M')].bake_s.astype(float).mean(), 0)} if PERF_LAPTOP and os.path.exists(os.path.join(PERF_LAPTOP, 'summary.csv')) else {})})
+TS2 = pd.DataFrame(rows); TS2.to_csv(os.path.join(RESULTS, 'tableS1_cases.csv'), index=False); print('\n' + TS2.to_string(index=False))
 
 thin, thick = THICK
 rows = []
@@ -114,10 +132,10 @@ plt.rcParams['font.family'] = 'sans-serif'; plt.rcParams['font.sans-serif'] = ['
 
 FIG2 = [  # title, case, look, wide view, close-up view, inset corner ('tl', 'tr', 'bl', 'br')
     ('a  Bone', 's0289', 'dvrBone', 'wide_017', 'close_014', 'tr'),
-    ('b  Contrast-enhanced vessels', 's0970', 'dvrCta', 'wide_016', 'close_015', 'tr'),
+    ('b  Contrast-enhanced vessels', 's0931', 'dvrCta', 'wide_030', 'close_009', 'tr'),
     ('c  Skin and bone', 's1340', 'dvrSoft', 'wide_016', 'close_015', 'tr'),
 ]
-VMAX = 0.2
+VMAX = 50 / 255   # upper end of the difference colour scale: 50 grey levels of 255
 INSET = 0.30   # inset side as a fraction of the panel width
 ASPECT = 1.3   # panel height / width (portrait: less black beside tall bodies)
 STOPS = np.array([[0.00, 0.001, 0.000, 0.014], [0.13, 0.078, 0.042, 0.206], [0.25, 0.232, 0.059, 0.437], [0.38, 0.390, 0.100, 0.502],
@@ -140,12 +158,14 @@ def crop_box(a, b, bmin, bmax):
     msk = (a.max(-1) > 6 / 255) | (b.max(-1) > 6 / 255); ys, xs = np.where(msk)
     x0, x1 = min(xs.min(), bmin[0]), max(xs.max(), bmax[0]); y0, y1 = min(ys.min(), bmin[1]), max(ys.max(), bmax[1])
     hh = min(800, max(y1 - y0, (x1 - x0) * ASPECT) * 1.04); ww = hh / ASPECT
-    cx, cy = min(max((x0 + x1) / 2, ww / 2), 800 - ww / 2), min(max((y0 + y1) / 2, hh / 2), 800 - hh / 2)
+    cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2   # centre on the body, then shift only as far as needed to keep the dashed box
+    cx = min(max(cx, x1 - ww / 2), x0 + ww / 2); cy = min(max(cy, y1 - hh / 2), y0 + hh / 2)
+    cx, cy = min(max(cx, ww / 2), 800 - ww / 2), min(max(cy, hh / 2), 800 - hh / 2)
     return [int(round(v)) for v in (cx - ww / 2, cy - hh / 2, cx + ww / 2, cy + hh / 2)]
 
 # layout in inches: the same gap between panels horizontally and vertically
-FIG_W, LBL, TTL, GAP, CB = 6.69, 0.25, 0.27, 0.05, 0.42   # width, row-label strip, title strip, gap, colour-bar strip
-pw = (FIG_W - LBL - 2 * GAP) / 3; ph = pw * ASPECT; FIG_H = TTL + 3 * ph + 2 * GAP + CB
+FIG_W, LBL, TTL, GAP, CB = 6.69, 0.25, 0.27, 0.05, 0.42   # width, row-label strip, title strip, gap, colour-bar strip (right of the bottom row)
+pw = (FIG_W - LBL - CB - 2 * GAP) / 3; ph = pw * ASPECT; FIG_H = TTL + 3 * ph + 2 * GAP
 fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=300); ax = np.empty((3, 3), dtype=object)
 for i in range(3):
     for j in range(3):
@@ -168,11 +188,14 @@ for j, (title, case, look, wide, close, corner) in enumerate(FIG2):
         A.imshow(small, extent=(ix, ix + isz, iy + isz, iy)); A.add_patch(Rectangle((ix, iy), isz, isz, fill=False, ec='#FFD400', lw=0.9))
         A.set_xlim(0, 1); A.set_ylim(ASPECT, 0)
     ax[0, j].set_title(title, fontsize=10, fontweight='bold', loc='left', pad=5)
-for i, n in enumerate(['Reference', '3DGS (2 M splats)', 'Absolute difference']):
-    ax[i, 0].set_ylabel(n, fontsize=10, fontweight='bold', labelpad=3)
-cbx = LBL + 2 * (pw + GAP); cax = fig.add_axes([cbx / FIG_W, (CB - 0.2) / FIG_H, pw / FIG_W, 0.09 / FIG_H]); cax.imshow(cmap(np.linspace(0, 1, 256))[None], aspect='auto', extent=(0, VMAX, 0, 1))
-cax.set_yticks([]); cax.set_xticks([0, VMAX]); cax.set_xticklabels(['0', f'≥{VMAX:g}'], fontsize=8); cax.tick_params(length=2, pad=1)
-fig.text((cbx - 0.08) / FIG_W, (CB - 0.155) / FIG_H, 'Mean absolute error (fraction of full scale)', fontsize=8, ha='right', va='center')
+for i, n in enumerate(['Volume rendering (reference)', '3DGS (2 M splats)', 'Difference']):
+    ax[i, 0].set_ylabel(n, fontsize=9, fontweight='bold', labelpad=3)
+def vbar(fig, x, y, h, W_, H_, label):   # vertical colour bar (grey levels of 255), x/y/h in inches
+    cax = fig.add_axes([x / W_, y / H_, 0.08 / W_, h / H_]); cax.imshow(cmap(np.linspace(0, 1, 256))[:, None], aspect='auto', extent=(0, 1, 0, VMAX * 255), origin='lower')
+    cax.set_xticks([]); cax.set_yticks([0, VMAX * 255]); cax.set_yticklabels(['0', f'≥{VMAX * 255:.0f}'], fontsize=7); cax.yaxis.tick_right(); cax.yaxis.set_label_position('right'); cax.tick_params(length=2, pad=1); cax.set_xlim(0, 1)
+    for sp_ in cax.spines.values(): sp_.set_linewidth(0.4)
+    cax.set_ylabel(label, fontsize=7, labelpad=2)
+vbar(fig, LBL + 3 * pw + 2 * GAP + 0.06, (FIG_H - TTL - 3 * ph - 2 * GAP) + 0.25 * ph, 0.5 * ph, FIG_W, FIG_H, 'difference (grey levels of 255)')
 for ext in ('png', 'pdf', 'svg'): fig.savefig(os.path.join(RESULTS, f'figure2.{ext}'), bbox_inches='tight', pad_inches=0.01)   # PDF and SVG keep the text editable
 fig.savefig(os.path.join(RESULTS, 'figure2.tif'), dpi=600, bbox_inches='tight', pad_inches=0.02, pil_kwargs={'compression': 'tiff_lzw'})   # raster for submission
 plt.close()
@@ -194,20 +217,22 @@ def ct_slice(path, frac=0.55, wl=40, ww=400):
         print('CT slice not drawn:', e); return None
 
 steps = [('CT volume +\ntransfer function', 'Hounsfield units →\ncolour and opacity'),
-         ('Light volume', 'sky visibility (24\ndirections) + key-light\nsoft shadows'),
-         ('Adaptive octree of\nmillimetre cubes', 'split at opacity\nboundaries, down to\nsub-voxel size'),
-         ('Bake per cell', '27 stratified samples:\ncolour and lighting of\nthe volume renderer'),
+         ('Light volume', 'sky light in 24\ndirections + soft\nshadows'),
+         ('Adaptive octree\nof mm cells', 'split where opacity\nchanges, down to\nsub-voxel size'),
+         ('Bake per cell', '27 samples per cell:\ncolour and lighting'),
          ('Opacity mapping', r'$\tau_{\mathrm{splat}} = \tau_{\mathrm{cell}}\,h^2/(2\pi s^2)$' + '\n' + r'$s = 0.55\,h$'),
-         ('Standard 3DGS', '.ply / .spz\nfor common 3DGS\nviewers')]
-W1, H1 = 6.69, 2.00; n = len(steps); bw = 0.98; gap = (W1 - 0.16 - n * bw) / (n - 1)
+         ('Faint splats\nretained', 'below the 8-bit floor:\nkept with $p = \\tau/\\tau_0$\nat opacity $\\alpha_0$'),
+         ('Standard 3DGS', '.ply / .spz for\ncommon viewers')]
+W1, H1 = 6.69, 1.95; n = len(steps); bw = 0.86; gap = (W1 - 0.16 - n * bw) / (n - 1)
 fig = plt.figure(figsize=(W1, H1), dpi=300); A = fig.add_axes([0, 0, 1, 1]); A.set_xlim(0, W1); A.set_ylim(H1, 0); A.axis('off')
-yB, hB, yI, S = 0.08, 0.5, 0.7, 0.86; yC = yI + S + 0.09
+yB, hB, yI, S = 0.08, 0.5, 0.68, 0.76; yC = yI + S + 0.09
 X = lambda i: 0.08 + i * (bw + gap); OX = lambda i: X(i) + bw / 2 - S / 2
 for i, (a, b) in enumerate(steps):
     A.add_patch(FancyBboxPatch((X(i), yB), bw, hB, boxstyle='round,pad=0,rounding_size=0.06', fc='#C0392B' if i == n - 1 else '#2F3B4C', ec='none'))
-    A.text(X(i) + bw / 2, yB + hB / 2, a, ha='center', va='center', color='white', fontsize=7.5, fontweight='bold', linespacing=1.15)
+    A.text(X(i) + bw / 2, yB + hB / 2, a, ha='center', va='center', color='white', fontsize=7, fontweight='bold', linespacing=1.15)
     A.text(X(i) + bw / 2, yC, b, ha='center', va='top', color='#333333', fontsize=6.5, linespacing=1.25)
     if i < n - 1: A.add_patch(FancyArrow(X(i) + bw + 0.015, yB + hB / 2, gap - 0.03, 0, width=0.06, head_width=0.14, head_length=0.05, length_includes_head=True, color='#8C8C8C', lw=0))
+    if 1 <= i <= 5: A.text(X(i) + 0.05, yB + 0.04, f'Step {i}', ha='left', va='top', color='#C9D3DF', fontsize=5, fontweight='bold')   # steps 1-5 of the Methods
 ct = ct_slice(FIG1_CT) if FIG1_CT else None   # 0: CT slice
 if ct is not None: A.imshow(ct, cmap='gray', extent=(OX(0), OX(0) + S, yI + S, yI), vmin=0, vmax=1)
 else: A.add_patch(Rectangle((OX(0), yI), S, S, fc='#D9D9D9', ec='none'))
@@ -241,27 +266,55 @@ A.add_patch(Rectangle((x0 - hp / 2, yb - HT), hp, HT, fc='none', ec='#2F3B4C', l
 for i in (-1, 0, 1): bump = pk * np.exp(-(xx - i * hp) ** 2 / (2 * sp ** 2)); A.fill_between(x0 + xx, yb, yb - HT * bump, fc=RED + (0.28,), ec='none'); A.plot(x0 + xx, yb - HT * bump, c='#C0392B', lw=0.5)
 A.plot(x0 + xx, yb - HT * tot, c='#7B241C', lw=0.9); A.plot([x0 - 1.6 * hp, x0 + 1.6 * hp], [yb, yb], c='#555555', lw=0.5)
 A.text(x0 + 1.6 * hp, yb - HT - 0.02, 'sum = $\\tau_{\\mathrm{cell}}$', ha='right', va='bottom', fontsize=5.5, color='#7B241C')
-gimg = img(FIG1_CASE, FIG1_LOOK, 'gs_2M', FIG1_VIEW); msk = gimg.max(-1) > 6 / 255; ys, xs = np.where(msk)   # 5: converted 3DGS
+gq = (S - 0.22) / 2; d5 = gq / 3; xl, xr = OX(5), OX(5) + S - gq; yq = yI + (S - gq) / 2   # 5: faint cells (below the floor) -> some kept at alpha_0
+for r in range(3):
+    for k in range(3): A.add_patch(Rectangle((xl + k * d5, yq + r * d5), d5, d5, fc=RED + (0.16,), ec='#BBBBBB', lw=0.3))
+A.text(xl + gq / 2, yq - 0.03, '$\\alpha < 1/255$', ha='center', va='bottom', fontsize=5.5, color='#555555')
+A.annotate('', xy=(xr - 0.02, yq + gq / 2), xytext=(xl + gq + 0.02, yq + gq / 2), arrowprops=dict(arrowstyle='-|>', color='#555555', lw=0.6, shrinkA=0, shrinkB=0))
+for r in range(3):
+    for k in range(3): A.add_patch(Rectangle((xr + k * d5, yq + r * d5), d5, d5, fc=RED + (0.5,) if (r * 3 + k) in (0, 4, 5, 7) else 'none', ec='#BBBBBB', lw=0.3))
+A.text(xr + gq / 2, yq - 0.03, '$\\alpha_0$', ha='center', va='bottom', fontsize=5.5, color='#555555')
+gimg = img(FIG1_CASE, FIG1_LOOK, 'gs_2M', FIG1_VIEW); msk = gimg.max(-1) > 6 / 255; ys, xs = np.where(msk)   # 6: converted 3DGS
 cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2; s2 = max(np.ptp(xs), np.ptp(ys)) * 0.52
 x_a, x_b = int(max(0, cx - s2)), int(min(800, cx + s2)); y_a, y_b = int(max(0, cy - s2)), int(min(800, cy + s2))
-A.imshow(gimg[y_a:y_b, x_a:x_b], extent=(OX(5), OX(5) + S, yI + S, yI))
-A.add_patch(Rectangle((OX(5), yI), S, S, fill=False, ec='black', lw=0.3))
+A.imshow(gimg[y_a:y_b, x_a:x_b], extent=(OX(6), OX(6) + S, yI + S, yI))
+A.add_patch(Rectangle((OX(6), yI), S, S, fill=False, ec='black', lw=0.3))
 A.set_xlim(0, W1); A.set_ylim(H1, 0)
 for ext in ('png', 'pdf', 'svg'): fig.savefig(os.path.join(RESULTS, f'figure1.{ext}'), bbox_inches='tight', pad_inches=0.01)
 fig.savefig(os.path.join(RESULTS, 'figure1.tif'), dpi=600, bbox_inches='tight', pad_inches=0.01, pil_kwargs={'compression': 'tiff_lzw'})
 plt.close()
 
-import matplotlib.pyplot as plt
-sub = TS2[~TS2.Variant.str.startswith('Uniform grid vs')]
-fig, axs = plt.subplots(1, 2, figsize=(6.69, 2.6), dpi=200, sharey=True)
-for A, kn in zip(axs, ['wide', 'close-up']):
-    d = sub[sub.Views == kn]; vars_ = list(dict.fromkeys(d.Variant)); x = np.arange(len(vars_)); w = 0.26
-    for k, (ln, col) in enumerate(zip([l for _, l in LOOKS], ['#B8860B', '#C0392B', '#D98880'])):
-        y = [float(d[(d.Look == ln) & (d.Variant == v)]['ΔPSNR (dB)'].iloc[0]) for v in vars_]
-        A.bar(x + (k - 1) * w, y, w, label=ln, color=col)
-    A.axhline(0, color='k', lw=0.6); A.set_xticks(x); A.set_xticklabels(vars_, rotation=30, ha='right', fontsize=6); A.set_title(kn, fontsize=8)
-axs[0].set_ylabel('Median ΔPSNR vs 2 M (dB)', fontsize=7); axs[0].legend(fontsize=6, frameon=False)
-plt.tight_layout(); fig.savefig(os.path.join(RESULTS, 'figureS1_ablation.png')); plt.close()
+# ---- Figure 3: effect of retaining faint splats (case 2, skin and bone look): volume rendering, 3DGS without, 3DGS with;
+#      close-up of the dashed box; difference from the reference ----
+FIG3 = ('s0138', 'dvrSoft', 'wide_033')   # case, look, view
+BOX3 = (0.01, 0.26, 0.34)                  # close-up box: left, top, side, as fractions of the cropped panel
+case3, look3, view3 = FIG3
+a3, b3, c3 = img(case3, look3, 'ref', view3), img(case3, look3, 'gs_noBoost', view3), img(case3, look3, 'gs_2M', view3)
+msk = a3.max(-1) > 12 / 255; ys, xs = np.where(msk); pad = 10
+y0, y1, x0, x1 = max(0, ys.min() - pad), min(800, ys.max() + pad), max(0, xs.min() - pad), min(800, xs.max() + pad)
+S3 = max(y1 - y0, x1 - x0); cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+y0 = max(0, cy - S3 // 2); y1 = min(800, y0 + S3); x0 = max(0, cx - S3 // 2); x1 = min(800, x0 + S3); S3 = min(y1 - y0, x1 - x0)
+bx, by, bs = x0 + int(BOX3[0] * S3), y0 + int(BOX3[1] * S3), int(BOX3[2] * S3)
+W3, TT3, G3, CB3 = 6.69, 0.22, 0.05, 0.42   # width, title strip, gap, colour-bar strip
+pw3 = (W3 - CB3 - 2 * G3) / 3; H3 = TT3 + 3 * pw3 + 2 * G3
+fig = plt.figure(figsize=(W3, H3), dpi=300)
+def ax3(i, j): return fig.add_axes([j * (pw3 + G3) / W3, (H3 - TT3 - (i + 1) * pw3 - i * G3) / H3, pw3 / W3, pw3 / H3])
+for j, (im, t) in enumerate([(a3, 'a  Volume rendering (reference)'), (b3, 'b  3DGS without faint splats'), (c3, 'c  3DGS with faint splats')]):
+    A = ax3(0, j); A.imshow(im[y0:y1, x0:x1]); A.set_title(t, fontsize=8, fontweight='bold', pad=3, loc='left')
+    A.add_patch(Rectangle((bx - x0, by - y0), bs, bs, fill=False, ec='#FFD400', lw=0.6, ls='--'))
+    B = ax3(1, j); B.imshow(im[by:by + bs, bx:bx + bs], interpolation='lanczos')
+    for A_ in (A, B):
+        A_.set_xticks([]); A_.set_yticks([])
+        for sp_ in A_.spines.values(): sp_.set_visible(False)
+for j, im in [(1, b3), (2, c3)]:
+    D = ax3(2, j); D.imshow(heat(a3, im)[y0:y1, x0:x1]); D.set_xticks([]); D.set_yticks([])
+    for sp_ in D.spines.values(): sp_.set_visible(False)
+vbar(fig, 3 * pw3 + 2 * G3 + 0.06, 0.25 * pw3, 0.5 * pw3, W3, H3, 'difference from reference (grey levels of 255)')
+for ext in ('png', 'pdf', 'svg'): fig.savefig(os.path.join(RESULTS, f'figure3.{ext}'), bbox_inches='tight', pad_inches=0.01)
+fig.savefig(os.path.join(RESULTS, 'figure3.tif'), dpi=600, bbox_inches='tight', pad_inches=0.02, pil_kwargs={'compression': 'tiff_lzw'})
+plt.close()
+for v_ in (b3, c3): print('Figure 3 PSNR', f'{10 * np.log10(1 / np.mean((a3 - v_) ** 2)):.1f} dB')
+
 import sys, platform, importlib
 vers = [f'python {sys.version.split()[0]} ({platform.platform()})']
 for mod in ['numpy', 'scipy', 'pandas', 'matplotlib', 'PIL', 'torch', 'torchvision', 'lpips']:

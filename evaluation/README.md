@@ -13,7 +13,7 @@ Open `CTBakeGS.html?study=1` (Chrome, opened directly as a file). The batch pane
   added per case.
 - **Output folder.**
 - **Looks.**
-- **Splat counts and ablations.**
+- **Splat counts and ablations.** The main setting is two million splats with faint splats retained (Step 5 of the paper); the ablations remove one step each (no opacity mapping, no anti-aliasing compensation, no faint splats, uniform grid, voxel-unit cells).
 
 For every CT × look it renders, from the same cameras at 800 × 800 on a black background, a converged reference
 (progressive photoreal, 128 samples per view), the real-time photoreal view and every 3DGS variant, in 48 wide and 16
@@ -31,10 +31,10 @@ python ctbakegs_tables_figures.py OUTPUT_FOLDER [--desktop SPEED_FOLDER] [--lapt
 ```
 
 On the first run, LPIPS (VGG) is computed for every image with `study_lpips.py` and saved in the output folder. The
-script then writes Tables 1–2, the supplementary tables, Figures 1–2 (PNG, PDF, SVG, TIFF) and `versions.txt` to
+script then writes Tables 1–4 and Tables S1–S3 (CSV; S1 cases, S2 paired comparisons, S3 thick slices), Figures 1–3 (PNG, PDF, SVG, TIFF) and `versions.txt` to
 `OUTPUT_FOLDER/paper_results`.
 
-- `--desktop`, `--laptop`: `perf` folders from *Measure speed only* on other computers (extra rows in Table 2).
+- `--desktop`, `--laptop`: `perf` folders from *Measure speed only* on other computers (extra rows in Table 3 and columns in Table S1).
 - `--ct`: the CT of case s0138, for the CT slice in Figure 1 (needs `nibabel`).
 
 The same steps are in `ctbakegs_tables_figures.ipynb` for Google Colab.
