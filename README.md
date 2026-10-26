@@ -1,4 +1,5 @@
 # CTBakeGS
+![Graphical abstract](graphical_abstract.png)
 
 Training-free conversion of photorealistic CT volume renderings into 3D Gaussian splats. The lighting of the photorealistic
 volume rendering is baked into the splats, which are saved as a standard `.ply` / `.spz` file for common 3DGS viewers.
