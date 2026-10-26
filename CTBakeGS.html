@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  CTBakeGS: CT → 3D Gaussian Splatting (light-baked, training-free) — version 1.0 (2026-10-19)
+  CTBakeGS: CT → 3D Gaussian Splatting (light-baked, training-free) — version 1.0 (2026-10-21)
   Copyright (C) 2026 Haruki Fukuda. Licensed under the MIT License (see LICENSE)
   For research and education only. Not for diagnosis or treatment decisions.
 -->
@@ -8463,7 +8463,7 @@ async function splatBake(how) {
       await offerFile(`${base}.${fmt}`, blob);
     }
   } catch (e) {
-    hideBusy(); console.error(e);
+    hideBusy(); console.error(e); window.__splErr = String(e && e.message || e);
     histToast('Could not make 3DGS: ' + (e.message || e), 4000);
   }
   prUI.busy = false;
@@ -8488,6 +8488,7 @@ uniform int uSBDirOn;
 uniform int uSBHalf;
 uniform vec3 uSBAn;          // 3/6-8：マスの大きさ（u 単位）→ 各軸のボクセル数の比（u / 間隔）
 uniform int uSBStrat;
+uniform float uSBRow;   // 行のずれ（マスの表を分けて焼くとき。乱数の種を同じにする）
 uniform int uSBVis;          // 3：色を「外から見える度合い」で重みづけ（表面のすぐ下の点ほど重く。奥の暗い点で色がくすまない）       // 3/6：マスの中を n×n×n の規則正しい点で調べる（0 なら従来のランダム8点）
         // 2：骨などを通り抜ける光線は、入ってから抜けるまでの半分だけ重ねる（裏側の面の粒と二重に数えない）
 void main(){
@@ -8497,7 +8498,7 @@ void main(){
   if (uSBMode == 3 || uSBMode >= 6) {
     // 中身の霧（段階2）：格子の1マス（xyz＝中心、w＝大きさのボクセル数）の中を調べ、濃さ（光の止まり方）と色を平均する
     // 6：濃さで重みをつけたマスの中の重心（マスの大きさで割ったずれ）と、濃さの平均
-    vec3 e3 = 1.0 / uVDim; vec2 sd3 = gl_FragCoord.xy;
+    vec3 e3 = 1.0 / uVDim; vec2 sd3 = gl_FragCoord.xy + vec2(0.0, uSBRow);
     float sw = 0.0, cw = 0.0; vec3 cs = vec3(0.0), ps = vec3(0.0);
     vec3 rd3 = normalize(vec3(0.3, -0.25, -1.0));
     int nS = uSBStrat > 0 ? uSBStrat : 2, nT = uSBStrat > 0 ? nS * nS * nS : 8;
@@ -8699,12 +8700,46 @@ function sbUniforms(P, seed) {
 
 // minCell / maxCell / minCellLo (cell sizes in voxels), keepFrac, volBudget, visMin, strat.
 async function splatHazeGPU(progress) {
+  // Optional range cache for the octree split test (prUI.spl.rangeCache): the volume is divided into 4^3-voxel tiles whose
+  // HU minimum and maximum are computed once on first use; a query covering more than 512 voxels combines full tiles from the
+  // cache and scans partial tiles exactly, so the result equals the direct scan. Contributed by W. Schweitzer; off by default,
+  // because on 1.5-mm volumes the tile bookkeeping costs more than it saves (it may pay off when cells span many voxels).
+  function sbRangeIndex(V, OM, nx, ny, nz) {
+    const bx = Math.ceil(nx / 4), by = Math.ceil(ny / 4), count = bx * by * Math.ceil(nz / 4);
+    const low = new Float32Array(count), high = new Float32Array(count), ready = new Uint8Array(count), result = new Float64Array(2);
+    return (xa, xb, ya, yb, za, zb) => {
+      let lo = 1e9, hi = -1e9;
+      if ((xb - xa + 1) * (yb - ya + 1) * (zb - za + 1) <= 512) {
+        for (let z = za; z <= zb; z++) for (let y = ya; y <= yb; y++) { const row = (z * ny + y) * nx; for (let i = row + xa, end = row + xb; i <= end; i++) { if (OM && OM[i]) continue; const v = V[i]; if (v < lo) lo = v; if (v > hi) hi = v; } }
+        result[0] = lo; result[1] = hi; return result;
+      }
+      for (let bz = za >> 2; bz <= (zb >> 2); bz++) {
+        const z0 = bz * 4, z1 = Math.min(z0 + 3, nz - 1);
+        for (let jy = ya >> 2; jy <= (yb >> 2); jy++) {
+          const y0 = jy * 4, y1 = Math.min(y0 + 3, ny - 1);
+          for (let ix = xa >> 2; ix <= (xb >> 2); ix++) {
+            const x0 = ix * 4, x1 = Math.min(x0 + 3, nx - 1), id = (bz * by + jy) * bx + ix;
+            const full = xa <= x0 && xb >= x1 && ya <= y0 && yb >= y1 && za <= z0 && zb >= z1;
+            let a = 1e9, b = -1e9;
+            if (full && ready[id]) { a = low[id]; b = high[id]; }
+            else {
+              const xA = Math.max(xa, x0), xB = Math.min(xb, x1);
+              for (let z = Math.max(za, z0); z <= Math.min(zb, z1); z++) for (let y = Math.max(ya, y0); y <= Math.min(yb, y1); y++) { const row = (z * ny + y) * nx; for (let i = row + xA, end = row + xB; i <= end; i++) { if (OM && OM[i]) continue; const v = V[i]; if (v < a) a = v; if (v > b) b = v; } }
+              if (full) { low[id] = a; high[id] = b; ready[id] = 1; }
+            }
+            if (a < lo) lo = a; if (b > hi) hi = b;
+          }
+        }
+      }
+      result[0] = lo; result[1] = hi; return result;
+    };
+  }
   if (pr.flt === null) pr.flt = !!gl.getExtension('EXT_color_buffer_float');
   if (!pr.flt || !sbEnsureProg(true) || !lvEnsureNow()) return null;
   const [nx, ny, nz] = volume.dims, V = volume.vol, sp = volume.spacing;
   const mob = document.documentElement.dataset.mobile === '1' || /iPhone|iPad|Android|OculusBrowser|Quest/i.test(navigator.userAgent || '');
   const budget = prUI.spl.volBudget || (mob ? 400000 : 2500000);
-  const OM = vr.mode === 'dvr' ? null : volume.outMask;   // the DVR view does not use the outside-air mask, so neither does the conversion
+  const OM = vr.mode === 'dvr' ? null : volume.outMask;   // the DVR renderer does not use the outside-air mask, so neither does the conversion
   // opacity of the transfer function per HU, and a prefix count of "visible" HU values (to test a HU range in O(1))
   const H0 = -1100, HN = 4400, vis = new Int32Array(HN + 1), aTab = new Float32Array(HN);
   {
@@ -8728,12 +8763,13 @@ async function splatHazeGPU(progress) {
   let cells, csz;
   // approximate splat count: the number of boundary cells scales roughly as (finest cell)^-p, so the finest cell size
   // is searched from the counts of the previous tries
-  const TGT = OCT && prUI.spl.target > 0 ? prUI.spl.target : 0, TGc = TGT / (prUI.spl.keepFrac ?? 0.97);
+  const TGT = OCT && prUI.spl.target > 0 ? prUI.spl.target : 0, TGc = TGT / (prUI.spl.keepFrac ?? (prUI.spl.roulette !== false ? 0.8 : 0.97));
   const lowCell = prUI.spl.minCellLo ?? 0.35;
   let octMin = prUI.spl.minCell ?? (TGT ? 1 : Math.min(...sp) >= 1.5 ? 0.5 : 1);
   const tgtLog = [];
   // cells are cubes in millimetres: the size unit is the finest voxel spacing (an = anisotropy per axis)
   const uMm = Math.min(...sp), an = OCT && prUI.spl.mmCells !== false ? sp.map((v) => uMm / v) : [1, 1, 1];
+  const rangeFn = (prUI.spl.rangeCache || window.__rangeCache) ? sbRangeIndex(V, OM, nx, ny, nz) : null;   // optional tile cache for the split test
   for (let tries = 0; tries < 6; tries++) {
     cells = []; csz = [];
     if (OCT) {
@@ -8748,7 +8784,8 @@ async function splatHazeGPU(progress) {
         const mg = h > minC * 1.01 ? h * (prUI.spl.margin ?? 1.5) : 0, ex = h * an[0], ey = h * an[1], ez = h * an[2], gx = mg * an[0], gy = mg * an[1], gz = mg * an[2];
         const xa = Math.max(0, Math.floor(x0 - gx)), xb = Math.min(nx - 1, Math.ceil(x0 + ex + gx)), ya = Math.max(0, Math.floor(y0 - gy)), yb = Math.min(ny - 1, Math.ceil(y0 + ey + gy)), za = Math.max(0, Math.floor(z0 - gz)), zb = Math.min(nz - 1, Math.ceil(z0 + ez + gz));
         let lo = 1e9, hi = -1e9, allOut = true;
-        for (let zz = za; zz <= zb; zz++) for (let yy = ya; yy <= yb; yy++) { const row = (zz * ny + yy) * nx; for (let xx = xa; xx <= xb; xx++) { const i = row + xx; if (OM && OM[i]) continue; allOut = false; const v = V[i]; if (v < lo) lo = v; if (v > hi) hi = v; } }
+        if (rangeFn) { const r = rangeFn(xa, xb, ya, yb, za, zb); lo = r[0]; hi = r[1]; allOut = lo > hi; }
+        else for (let zz = za; zz <= zb; zz++) for (let yy = ya; yy <= yb; yy++) { const row = (zz * ny + yy) * nx; for (let xx = xa; xx <= xb; xx++) { const i = row + xx; if (OM && OM[i]) continue; allOut = false; const v = V[i]; if (v < lo) lo = v; if (v > hi) hi = v; } }
         if (allOut || !visBetween(lo, hi)) return;
         if (h > minC * 1.01 && isEdge(lo, hi)) { const q = h / 2; for (const dz of [0, q]) for (const dy of [0, q]) for (const dx of [0, q]) stack.push(x0 + dx * an[0], y0 + dy * an[1], z0 + dz * an[2], q); return; }
         cells.push(x0 + ex / 2 - 0.5, y0 + ey / 2 - 0.5, z0 + ez / 2 - 0.5); csz.push(h);
@@ -8787,52 +8824,66 @@ async function splatHazeGPU(progress) {
   const n = cells.length / 3;
   if (!n) return null;
   // bake colour and opacity of every cell on the GPU (S passes, averaged)
-  // Cells are laid out 1024 per row. Above ~16.7 M cells the height would exceed the texture limit (16384 on many GPUs), so the rows are widened (the linear order is unchanged, so results are identical when 1024 suffices).
+  // Cells are laid out 1024 per row. Above ~16.7 M cells the row is widened (as in the evaluation build, so that the
+  // stratified-sample jitter, seeded by the cell's position in this layout, is identical). The layout is baked in
+  // chunks of rows so that the GPU textures stay small on computers with little graphics memory; uSBRow carries the
+  // row offset of the chunk into the shader, so the result does not depend on the chunk size.
   const MT = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 16384; let W = 1024; while (Math.ceil(n / W) > MT && W < MT) W *= 2;
   const H = Math.ceil(n / W), P = sbProgV;
   if (H > MT) throw new Error('too many cells for this GPU (' + n.toLocaleString('en-US') + ')');
-  const pts = new Float32Array(W * H * 4).fill(-1);
-  for (let i = 0; i < n; i++) { pts[i * 4] = (cells[i * 3] + 0.5) / nx; pts[i * 4 + 1] = (cells[i * 3 + 1] + 0.5) / ny; pts[i * 4 + 2] = (cells[i * 3 + 2] + 0.5) / nz; pts[i * 4 + 3] = csz[i]; }
-  const mkTex = (data) => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, H);
+  const Hc = Math.max(1, Math.min(H, prUI.spl.bakeChunkRows || window.__bakeChunkRows || Math.floor(4194304 / W)));   // rows per chunk (4 M cells)
+  const mkTex = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, Hc);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
-    if (data) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, H, gl.RGBA, gl.FLOAT, data); return t; };
-  const tPts = mkTex(pts), tOut = mkTex(null);
+    return t; };
+  const tPts = mkTex(), tOut = mkTex();
   const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tOut, 0);
   const cleanup = () => { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb); gl.deleteTexture(tPts); gl.deleteTexture(tOut); gl.activeTexture(gl.TEXTURE0); gl.disable(gl.SCISSOR_TEST); };
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { cleanup(); return null; }
-  const S = 2, rowsPer = Math.max(1, Math.floor((mob ? 16000 : 80000) / W)), job = {}, buf = new Float32Array(W * H * 4), acc = new Float32Array(n * 4);
+  const S = 2, rowsPer = Math.max(1, Math.floor((mob ? 16000 : 80000) / W)), job = {}, pts = new Float32Array(W * Hc * 4), buf = new Float32Array(W * Hc * 4), acc = new Float32Array(n * 4);
   const total = S * Math.ceil(H / rowsPer); let done = 0;
   try {
-    for (let pass = 1; pass <= S; pass++) {
-      for (let y0 = 0; y0 < H; y0 += rowsPer) {
+    for (let r0 = 0; r0 < H; r0 += Hc) {
+      const rows = Math.min(Hc, H - r0), i0 = r0 * W, i1 = Math.min(n, (r0 + rows) * W), cn = i1 - i0;
+      pts.fill(-1);
+      for (let i = i0; i < i1; i++) { const o = (i - i0) * 4; pts[o] = (cells[i * 3] + 0.5) / nx; pts[o + 1] = (cells[i * 3 + 1] + 0.5) / ny; pts[o + 2] = (cells[i * 3 + 2] + 0.5) / nz; pts[o + 3] = csz[i]; }
+      gl.bindTexture(gl.TEXTURE_2D, tPts); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, rows, gl.RGBA, gl.FLOAT, pts, 0);
+      for (let pass = 1; pass <= S; pass++) {
+        for (let y0 = 0; y0 < rows; y0 += rowsPer) {
+          while (!gpuIdle(job)) await new Promise((r) => setTimeout(r, 4));
+          sbUniforms(P, pass);
+          gl.uniform1i(P.u('uVR'), VR_MODES[vr.mode] || 5); lvUniforms(P, true); gl.uniform3fv(P.u('uL'), pr.Lw);
+          gl.activeTexture(gl.TEXTURE17); gl.bindTexture(gl.TEXTURE_2D, tPts);
+          gl.uniform1i(P.u('uSBRay'), 0); gl.uniform1f(P.u('uSBRow'), r0);
+          gl.uniform1i(P.u('uSBMode'), 3); gl.uniform1i(P.u('uSBStrat'), prUI.spl.strat ?? 3); gl.uniform3f(P.u('uSBAn'), an[0], an[1], an[2]); gl.uniform1i(P.u('uSBVis'), vr.mode === 'dvr' ? 1 : 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.viewport(0, 0, W, Hc);
+          gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
+          gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, W, Math.min(rowsPer, rows - y0));
+          gl.bindVertexArray(vao); gl.drawArrays(gl.TRIANGLES, 0, 3);
+          gl.disable(gl.SCISSOR_TEST);
+          gpuMark(job);
+          done++; await progress(done / total);
+        }
         while (!gpuIdle(job)) await new Promise((r) => setTimeout(r, 4));
-        sbUniforms(P, pass);
-        gl.uniform1i(P.u('uVR'), VR_MODES[vr.mode] || 5); lvUniforms(P, true); gl.uniform3fv(P.u('uL'), pr.Lw);
-        gl.activeTexture(gl.TEXTURE17); gl.bindTexture(gl.TEXTURE_2D, tPts);
-        gl.uniform1i(P.u('uSBRay'), 0);
-        gl.uniform1i(P.u('uSBMode'), 3); gl.uniform1i(P.u('uSBStrat'), prUI.spl.strat ?? 3); gl.uniform3f(P.u('uSBAn'), an[0], an[1], an[2]); gl.uniform1i(P.u('uSBVis'), vr.mode === 'dvr' ? 1 : 0);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.viewport(0, 0, W, H);
-        gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
-        gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, W, Math.min(rowsPer, H - y0));
-        gl.bindVertexArray(vao); gl.drawArrays(gl.TRIANGLES, 0, 3);
-        gl.disable(gl.SCISSOR_TEST);
-        gpuMark(job);
-        done++; await progress(done / total);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.readPixels(0, 0, W, rows, gl.RGBA, gl.FLOAT, buf);
+        for (let i = 0; i < cn * 4; i++) acc[i0 * 4 + i] += buf[i];
       }
-      while (!gpuIdle(job)) await new Promise((r) => setTimeout(r, 4));
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, buf);
-      for (let i = 0; i < n * 4; i++) acc[i] += buf[i];
     }
   } finally { cleanup(); requestDraw(false); }
   // opacity mapping: a lattice of Gaussians (spacing h, width s = 0.55 h) sums along a ray to the optical depth of the
-  // cell when each splat carries tau = tau_cell * h^2 / (2 pi s^2); cells that are practically invisible are dropped
+  // cell when each splat carries tau = tau_cell * h^2 / (2 pi s^2); cells that are practically invisible are dropped.
+  // Faint splats (opacity below a0, default 0.01) would fall below the 8-bit floor (1/255) of the file and of the
+  // rasteriser and vanish, so they are kept with probability tau / tau0 and raised to a0: the expected optical depth is
+
   const keep = [], kV = 1 / (2 * Math.PI * 0.55 * 0.55), aKeep = new Float32Array(n);
+  const a0V = prUI.spl.aMin ?? 0.01, t0V = -Math.log(1 - a0V), rouV = prUI.spl.roulette !== false;
+  const hash01 = (i) => { let h = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0) / 4294967296; };
   for (let i = 0; i < n; i++) {
     const a = acc[i * 4 + 3] / S;
-    if (!(a > 0.004)) continue;
-    keep.push(i);
-    aKeep[i] = prUI.spl.naiveVol ? clamp(a, 0, 0.99) : 1 - Math.exp(-(-Math.log(1 - clamp(a, 0, 0.999)) * kV));   // naiveVol: ablation (cell opacity as is)
+    const tk = -Math.log(1 - clamp(a, 0, 0.999)) * (prUI.spl.naiveVol ? 1 : kV);   // optical depth of one splat (naiveVol: ablation, cell opacity as is)
+    if (!rouV) { if (a > 0.004) { keep.push(i); aKeep[i] = 1 - Math.exp(-tk); } continue; }
+    if (tk >= t0V) { keep.push(i); aKeep[i] = 1 - Math.exp(-tk); }
+    else if (tk > 1e-5 && hash01(i) < tk / t0V) { keep.push(i); aKeep[i] = a0V; }
   }
   const m = keep.length;
   if (!m) return null;
@@ -8851,6 +8902,7 @@ async function splatHazeGPU(progress) {
   console.log('[splat] volume splats', m, 'of', n, 'target', TGT, JSON.stringify(tgtLog), 'cell', c);
   return B;
 }
+
 function splatJoin(parts, name) {
   if (parts.length === 1) return Object.assign({}, parts[0], { name });
   const n = parts.reduce((a, B) => a + B.n, 0);
@@ -10226,7 +10278,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
   {
     const SD = { items: [], out: null, outName: '', running: false, stop: false, looks: ['dvrBone', 'dvrCta', 'dvrSoft'], seed: 1, W: 800, H: 800, refN: 128, closeK: 0.3, nWide: 48, nClose: 16, summary: [] };
     const LOOK_NAMES = { dvrBone: 'Bone', dvrCta: 'Contrast vessels', dvrSoft: 'Skin & bone' };
-    const BASE = { vol: true, octree: true, refine: true, mmCells: true, margin: 1.5, strat: 3, centroid: false, moment: false, cellRay: false, roulette: false, jitter: 0, naiveVol: false, aa: true, volBudget: 0 };
+    const BASE = { vol: true, octree: true, refine: true, mmCells: true, margin: 1.5, strat: 3, centroid: false, moment: false, cellRay: false, roulette: true, jitter: 0, naiveVol: false, aa: true, volBudget: 0 };   // roulette: faint splats kept stochastically with raised opacity (standard)
     const VARIANTS = [
       { id: '2M', spl: { target: 2000000 }, saveAll: true, fps: true, main: true },
       { id: 'noAA', from: '2M', render: { aa: false } },
@@ -10234,12 +10286,13 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
       { id: '1M', spl: { target: 1000000 }, saveAll: true, fps: true },
       { id: '3M', spl: { target: 3000000 }, saveAll: true, fps: true },
       { id: 'naiveOpacity', spl: { target: 2000000, naiveVol: true } },
+      { id: 'noBoost', spl: { target: 2000000, roulette: false } },   // faint splats dropped instead (below the 8-bit floor)
       { id: 'voxelCells', spl: { target: 2000000, mmCells: false } },
       { id: 'uniformCells', spl: { octree: false, refine: false, target: 0, volBudget: 8000000 } },
 
       { id: 'adaptiveMatched', matchTo: 'uniformCells', spl: {}, off: true },
     ];
-    const VNAMES = { '2M': '2 M (main)', '0.5M': '0.5 M', '1M': '1 M', '3M': '3 M', noAA: 'No AA comp.', naiveOpacity: 'Plain opacity', voxelCells: 'Voxel cells', uniformCells: 'Uniform cells', adaptiveMatched: 'Adaptive @ uniform count' };
+    const VNAMES = { '2M': '2 M (main)', '0.5M': '0.5 M', '1M': '1 M', '3M': '3 M', noAA: 'No AA comp.', naiveOpacity: 'Plain opacity', noBoost: 'No faint boost', voxelCells: 'Voxel cells', uniformCells: 'Uniform cells', adaptiveMatched: 'Adaptive @ uniform count' };
     SD.on = new Set(VARIANTS.filter((v) => !v.off).map((v) => v.id));
     SD.figRes = 2400; SD.figRefN = 256; SD.figMode = false;
     const FIG_WIDE = [0, 8, 16, 24], FIG_CLOSE = [0, 1, 2, 3];
@@ -10253,9 +10306,9 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
       <p id="sdOutName">Output: (not chosen — falls back to one zip per scene)</p>
       <b class="l">Looks</b><div class="r" id="sdLooks">${Object.entries(LOOK_NAMES).map(([k, v]) => `<button type="button" data-v="${k}" aria-pressed="true">${v}</button>`).join('')}</div>
       <b class="l">Splat counts</b><div class="r" id="sdVarsN">${['0.5M', '1M', '2M', '3M'].map((k) => `<button type="button" data-v="${k}" aria-pressed="${SD.on.has(k)}"${k === '2M' ? ' title="The main result and the base of the ablations (always included in Run study; can be turned off for Measure speed only)"' : ''}>${VNAMES[k]}</button>`).join('')}</div>
-      <b class="l">Ablations (at 2 M)</b><div class="r" id="sdVarsA">${['noAA', 'naiveOpacity', 'voxelCells', 'uniformCells', 'adaptiveMatched'].map((k) => `<button type="button" data-v="${k}" aria-pressed="${SD.on.has(k)}">${VNAMES[k]}</button>`).join('')}</div>
+      <b class="l">Ablations (at 2 M)</b><div class="r" id="sdVarsA">${['noAA', 'naiveOpacity', 'noBoost', 'voxelCells', 'uniformCells', 'adaptiveMatched'].map((k) => `<button type="button" data-v="${k}" aria-pressed="${SD.on.has(k)}">${VNAMES[k]}</button>`).join('')}</div>
       <b class="l">Cases</b><div id="sdList" style="max-height:220px;overflow:auto;font-size:12px"></div>
-      <div class="r"><button type="button" class="go" id="sdRun" disabled>Run study</button><button type="button" id="sdStop" disabled>Stop</button></div>
+      <div class="r"><button type="button" class="go" id="sdRun" disabled>Run study</button><button type="button" id="sdStop" disabled>Stop</button><label class="check" title="Reuse the reference images already in the output folder and add only the variants that are not there yet"><input type="checkbox" id="sdReuse"> Add to existing output (reuse references)</label><label class="check" title="With the option above: convert and render the selected variants again even if they are already in the output folder (their files are replaced)"><input type="checkbox" id="sdRedo"> Recompute selected variants</label><label class="check" title="Experimental: cache the HU range of 4×4×4-voxel tiles for the octree split test (same result, different speed; off = the setting used in the paper)"><input type="checkbox" id="sdCache"> Octree range cache</label></div>
       <b class="l">Figure images (selected views only, reference + real-time + 3DGS 2 M)</b><div class="r" id="sdFigRes">${[1600, 2400, 3200].map((r) => `<button type="button" data-v="${r}" aria-pressed="${r === 2400}">${r}²</button>`).join('')}</div>
       <div class="r"><button type="button" id="sdFig" disabled>Render figure images</button></div>
       <b class="l">Speed only (another computer): 1 M / 2 M / 3 M, conversion time and frame rate, no images</b><div class="r"><button type="button" id="sdPerf" disabled>Measure speed only</button></div>
@@ -10390,6 +10443,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
       await sleep(1500);
     }
     const imgCopy = (d) => new Uint8ClampedArray(d);
+    async function readImg(path, R) { const i = path.lastIndexOf('/'), d = await dirOf(path.slice(0, i)), f = await (await d.getFileHandle(path.slice(i + 1))).getFile(); const bm = await createImageBitmap(f); R.ctx.drawImage(bm, 0, 0, R.W, R.H); bm.close(); return imgCopy(R.ctx.getImageData(0, 0, R.W, R.H).data); }
     function diffPng(a, b, W, H) {
       const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d'), im = x.createImageData(W, H);
       for (let i = 0; i < a.length; i += 4) { const e = Math.min(1, (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2])) / 3 / 64);
@@ -10408,7 +10462,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
       let tries = 0, st = null, tTry = performance.now(), msLast = 0, kf = spl.target && SD.kfHint ? SD.kfHint : null;
       if (kf) prUI.spl.keepFrac = kf;
       for (;;) {
-        window.__splLast = null; tTry = performance.now();
+        window.__splLast = null; window.__splErr = null; tTry = performance.now();
         try { await splatBake('load'); } finally { showBusy = sb0; }
         msLast = performance.now() - tTry; st = window.__splLast; tries++;
 
@@ -10425,14 +10479,15 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
       delete prUI.spl.keepFrac;
       const t1 = performance.now(); prUI.busy = true;
       const o = models.length > n0 ? models[models.length - 1] : null;
-      if (!o || o.kind !== 'splat') throw new Error('conversion failed');
+      if (!o || o.kind !== 'splat') throw new Error('conversion failed: ' + (window.__splErr || 'no model'));
       o.__study = true; o.visible = false; selModel = -1;
       return { model: o, ms: t1 - t0, phases: phases.map((p, i) => ({ step: p.k, ms: (i + 1 < phases.length ? phases[i + 1].t : t1) - p.t })), splats: o.n, tries, msLastTry: msLast, keepFrac: kf, cells: st && st.cells, minCellVox: st && st.minCell, limitedByResolution: !!(st && spl.target && st.kept < st.target * 0.92 && st.minCell <= st.floor * 1.001), plyBytes: o.src && o.src[0] ? o.src[0].size : null };
     }
 
     async function runScene(it, caseName, look, li, tag) {
       const FM = SD.figMode, PM = SD.perfMode, prefix = FM ? `figures_${SD.W}/${caseName}/${look}` : PM ? `perf/${caseName}/${look}` : `${caseName}/${look}`;
-      if (await exists(prefix + '/done.json')) { sprog(`${tag}: already done, skipping`); return; }
+      const RE = SD.reuse && !FM && !PM;   // add variants to an existing output: reuse its reference images, skip variants already there
+      if (!RE && await exists(prefix + '/done.json')) { sprog(`${tag}: already done, skipping`); return; }
       const out = sink(prefix), W = SD.W, H = SD.H, rows = [], res = { case: caseName, source: it.label, look, lookName: LOOK_NAMES[look], app: ($('aboutVer') || {}).textContent || '', date: new Date().toISOString(), settings: {}, env: {}, ct: {}, timing: {}, variants: {}, convergence: null };
 
       vrApplyPreset(look); setView('front'); await sleep(300);
@@ -10458,6 +10513,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
         for (let k = 0; k < (PM ? 0 : views.length); k++) {
           if (SD.stop) throw new Error('stopped');
           sprog(`${tag} · reference ${k + 1}/${views.length}`);
+          if (RE && await exists(prefix + `/images/ref/${vname(views[k])}.png`)) { refs.push(await readImg(prefix + `/images/ref/${vname(views[k])}.png`, R)); continue; }
           setMode('ref'); ensureLight(); await tick();
           const s = await shot(R, 'ref', views[k].c, FM ? SD.figRefN : SD.refN); refs.push(imgCopy(s.img));
           await out.put(`images/ref/${vname(views[k])}.png`, await pngOf(R));
@@ -10472,7 +10528,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
         }
         res.timing.refMsTotal = performance.now() - t0;
 
-        if (li === 0 && !FM && !PM) {
+        if (li === 0 && !FM && !PM && !RE) {
           const cv = [];
           for (const k of [0, Math.floor(wide.length / 2)]) { setMode('ref'); ensureLight(); await tick(); const s = await shot(R, 'ref', views[k].c, SD.refN * 2); const p = psnr(refs[k], s.img); cv.push({ view: vname(views[k]), samples: [SD.refN, SD.refN * 2], psnr: p.psnr }); await out.put(`images/ref${SD.refN * 2}/${vname(views[k])}.png`, await pngOf(R)); }
           res.convergence = cv;
@@ -10482,6 +10538,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
         for (const V of (FM ? VARIANTS.filter((v) => v.id === '2M') : PM ? VARIANTS.filter((v) => ['0.5M', '1M', '2M', '3M'].includes(v.id) && SD.on.has(v.id)) : (SD.variants || VARIANTS.filter((v) => SD.on.has(v.id))))) {
           if (SD.stop) throw new Error('stopped');
 
+          if (RE && !SD.redo && await exists(prefix + `/images/gs_${V.id}/${vname(views[views.length - 1])}.png`)) { sprog(`${tag} · ${V.id}: already there, skipping`); continue; }
           if (V.id === 'voxelCells' && Math.max(...volume.spacing) - Math.min(...volume.spacing) < 0.01) { res.skipped = (res.skipped || []).concat('voxelCells (isotropic: identical to mm cells)'); continue; }
           let info;
           if (V.matchTo && !made[V.matchTo]) { res.skipped = (res.skipped || []).concat(V.id + ' (needs ' + V.matchTo + ')'); continue; }
@@ -10511,16 +10568,18 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
           if (!FM) SD.summary.push([caseName, look, V.id, info.splats, V.from ? '' : info.msLastTry / 1000, (info.plyBytes || 0) / 1e6, fps ? fps.fps : '', ...(PM ? ['', '', '', '', '', ''] : [res.variants[V.id].wide.psnr, res.variants[V.id].wide.psnrFg, res.variants[V.id].wide.ssim, res.variants[V.id].close.psnr, res.variants[V.id].close.psnrFg, res.variants[V.id].close.ssim])]);
         }
 
-        res.settings = { figureImages: FM, width: W, height: H, refSamples: FM ? SD.figRefN : SD.refN, wideViews: wide.length, closeViews: close.length, elevationsDeg: [-20, 10, 40], closeDistanceFactor: SD.closeK, closePick: 'farthest-point sampling on visible surface voxels (alpha>0.5 next to alpha<0.1)', verticalFovDeg: 30, background: 'black', base: BASE, variants: (SD.variants || VARIANTS.filter((v) => SD.on.has(v.id))).map((v) => ({ id: v.id, spl: v.spl || null, render: v.render || null, from: v.from || null })) };
+        res.settings = { rangeCache: !!BASE.rangeCache, figureImages: FM, width: W, height: H, refSamples: FM ? SD.figRefN : SD.refN, wideViews: wide.length, closeViews: close.length, elevationsDeg: [-20, 10, 40], closeDistanceFactor: SD.closeK, closePick: 'farthest-point sampling on visible surface voxels (alpha>0.5 next to alpha<0.1)', verticalFovDeg: 30, background: 'black', base: BASE, variants: (SD.variants || VARIANTS.filter((v) => SD.on.has(v.id))).map((v) => ({ id: v.id, spl: v.spl || null, render: v.render || null, from: v.from || null })) };
         res.env = { ...glInfo(), userAgent: navigator.userAgent, devicePixelRatio: window.devicePixelRatio, hardwareConcurrency: navigator.hardwareConcurrency || null };
         res.ct = { dims: volume.dims, spacingMm: volume.spacing, desc: volume.desc };
         res.look = { preset: vr.preset, mode: vr.mode, lo: vr.lo, hi: vr.hi, density: vr.dens, pts: vr.pts };
         res.light = { preset: pr.preset, soft: pr.soft, exposure: view.exp, azimuth: view.laz, elevation: view.lel };
-        await out.put('metrics_per_view.csv', new Blob([['case,look,variant,view_kind,view,psnr,psnr_fg,ssim,iou,area', ...rows.map(csvRow)].join('\n')]));
+        if (RE) { try { const prev = JSON.parse(await (await (await dirOf(prefix)).getFileHandle('scene.json').then((h) => h.getFile())).text()); res.variants = { ...prev.variants, ...res.variants }; res.timing = { ...prev.timing, ...res.timing }; if (prev.convergence) res.convergence = prev.convergence; res.settings.variants = [...(prev.settings.variants || []).filter((v) => !res.settings.variants.some((w) => w.id === v.id)), ...res.settings.variants]; } catch (e) { /* no previous scene.json */ }
+          try { const t = await (await (await dirOf(prefix)).getFileHandle('metrics_per_view.csv').then((h) => h.getFile())).text(); const mine = new Set(rows.map((r) => r[2])); rows.unshift(...t.split('\n').slice(1).filter((x) => x.trim() && !mine.has(x.split(',')[2].replace(/"/g, ''))).map((x) => [x])); } catch (e) { /* */ } }
+        await out.put('metrics_per_view.csv', new Blob([['case,look,variant,view_kind,view,psnr,psnr_fg,ssim,iou,area', ...rows.map((r) => (r.length === 1 ? r[0] : csvRow(r)))].join('\n')]));
         await out.put('scene.json', new Blob([JSON.stringify(res, null, 1)]));
         await out.put('done.json', new Blob([JSON.stringify({ done: new Date().toISOString() })]));
         await out.close();
-        if (SD.out && !FM) await writeOut(PM ? 'perf/summary.csv' : 'summary.csv', new Blob([['case,look,variant,splats,bake_s,ply_mb,fps_800,wide_psnr,wide_psnr_fg,wide_ssim,close_psnr,close_psnr_fg,close_ssim', ...(SD.summaryOld || []), ...SD.summary.map(csvRow)].join('\n')]));
+        if (SD.out && !FM) { const keys = new Set(SD.summary.map((r) => r.slice(0, 3).join('|'))); await writeOut(PM ? 'perf/summary.csv' : 'summary.csv', new Blob([['case,look,variant,splats,bake_s,ply_mb,fps_800,wide_psnr,wide_psnr_fg,wide_ssim,close_psnr,close_psnr_fg,close_ssim', ...(SD.summaryOld || []).filter((x) => !keys.has(x.split(',').slice(0, 3).map((q) => q.replace(/"/g, '')).join('|'))), ...SD.summary.map(csvRow)].join('\n')])); }
       } finally {
         freeTarget(R.tgt); SPL = null;
         for (let i = models.length - 1; i >= 0; i--) if (models[i].__study) { const o = models[i]; models.splice(i, 1); try { modelPool.delete(o.id); disposeModel(o); } catch (e) { /* */ } }
@@ -10563,9 +10622,9 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
         q('sdRun').disabled = q('sdFig').disabled = q('sdPerf').disabled = false; q('sdStop').disabled = true; requestDraw(false);
       }
     }
-    q('sdRun').addEventListener('click', () => runStudy(false));
+    q('sdRun').addEventListener('click', () => { SD.reuse = !!q('sdReuse').checked; SD.redo = !!q('sdRedo').checked; BASE.rangeCache = !!q('sdCache').checked; runStudy(false); });
     q('sdFig').addEventListener('click', () => runStudy(true));
-    q('sdPerf').addEventListener('click', () => runStudy('perf'));
+    q('sdPerf').addEventListener('click', () => { BASE.rangeCache = !!q('sdCache').checked; runStudy('perf'); });
     q('sdStop').addEventListener('click', () => { SD.stop = true; });
     window.__study = SD;
   }
