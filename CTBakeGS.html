@@ -1771,6 +1771,7 @@ html.demo #viewResetWrap {left: auto !important; right: 16px !important; bottom:
 #dmPanel .dm-note b {color: var(--dm-text); font-weight: 600;}
 #dmPanel .dm-foot {color: var(--dm-mute); font-size: 11.5px; border-top: 1px solid var(--dm-line); padding-top: 9px; margin: 2px 0 0;}
 #dmPanel .dm-x {display: none;}
+#dmLensRing {position: absolute; z-index: 4; pointer-events: none; border: 1.5px solid #9de5ff; border-radius: 50%; transform: translate(-50%, -50%); box-sizing: border-box; box-shadow: 0 0 0 1px rgba(0,0,0,.6);}
 #dmStatus {position: fixed; z-index: 59; left: 50%; transform: translateX(-50%); bottom: 14px; max-width: min(760px, calc(100vw - 32px));
   background: rgba(20, 21, 26, 0.86); color: #ecebe8; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px;
   font: 12.5px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 6px 14px; pointer-events: none; text-align: center;}
@@ -7283,6 +7284,10 @@ uniform vec3 uObjT;
 uniform vec3 uEye, uR, uU, uF;
 uniform float uTan, uAspect, uNear, uFar, uAlpha, uBright;
 uniform vec2 uViewport, uOff;
+uniform highp sampler2D uLensData;
+uniform int uLens;
+uniform vec3 uLensCircle; // framebuffer pixels: center x/y, radius
+uniform vec3 uLensTunnel; // camera-space slope change x/y, entrance depth
 uniform int uClip, uVC;
 uniform mat3 uW2T;
 uniform vec3 uCMin, uCMax, uVCn;
@@ -7306,10 +7311,18 @@ void main(){
     if (any(lessThan(tt, uCMin)) || any(greaterThan(tt, uCMax))) return;
     if (uVC == 1 && dot(w, uVCn) < uVCd) return;
   }
-  vec4 t1 = texelFetch(uData, tc(b + 1u), 0);
-  vec4 t2 = texelFetch(uData, tc(b + 2u), 0);
-  vec4 t3 = texelFetch(uData, tc(b + 3u), 0);
   float x = dot(v, uR), y = dot(v, uU);
+  vec2 ndc = vec2((x / z - uOff.x) / (uTan * uAspect), (y / z - uOff.y) / uTan);
+  // Select the complete precomputed record by projected splat center. Sorting
+  // stays valid because both transfer functions share the same cell centers.
+  vec2 focal = uViewport / (2.0 * uTan * vec2(uAspect, 1.0));
+  vec2 tunnelCenter = uLensCircle.xy + focal * uLensTunnel.xy * ((z - uLensTunnel.z) / z);
+  bool bone = uLens == 1 && distance((ndc * 0.5 + 0.5) * uViewport, tunnelCenter) <= uLensCircle.z;
+  if (bone) t0 = texelFetch(uLensData, tc(b), 0);
+  if (t0.w <= 0.0) return;
+  vec4 t1 = bone ? texelFetch(uLensData, tc(b + 1u), 0) : texelFetch(uData, tc(b + 1u), 0);
+  vec4 t2 = bone ? texelFetch(uLensData, tc(b + 2u), 0) : texelFetch(uData, tc(b + 2u), 0);
+  vec4 t3 = bone ? texelFetch(uLensData, tc(b + 3u), 0) : texelFetch(uData, tc(b + 3u), 0);
   float fx = uViewport.x / (2.0 * uTan * uAspect), fy = uViewport.y / (2.0 * uTan);
   mat3 So = mat3(t1.x, t1.y, t1.z, t1.y, t1.w, t2.x, t1.z, t2.x, t2.y);
   mat3 Sw = uObjM * So * transpose(uObjM);
@@ -7351,7 +7364,6 @@ void main(){
     rgb = max(rgb, 0.0);
   }
   vCol = vec4(min(rgb * uBright, 1.0), min(t0.w * uAlpha * aaK, 0.995));
-  vec2 ndc = vec2((x / z - uOff.x) / (uTan * uAspect), (y / z - uOff.y) / uTan);
   vec2 off = (corner.x * major + corner.y * minor) * 2.0 / uViewport;
   float A = (uFar + uNear) / (uFar - uNear), B = -2.0 * uFar * uNear / (uFar - uNear);
   gl_Position = vec4(ndc + off, A + B / z, 1.0);
@@ -8239,21 +8251,7 @@ function createSplatModel(name, n, centers, cov, colors, maxScale, sh, K) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     o.shDeg = k === 15 ? 3 : k === 8 ? 2 : 1; o.shT = T;
   }
-  const W = 4096, rows = Math.ceil(n * 4 / W);
-  const data = new Float32Array(W * rows * 4);
-  for (let i = 0; i < n; i++) {
-    const b = i * 16;
-    data[b] = centers[i * 3]; data[b + 1] = centers[i * 3 + 1]; data[b + 2] = centers[i * 3 + 2]; data[b + 3] = colors[i * 4 + 3] / 255;
-    data[b + 4] = cov[i * 6]; data[b + 5] = cov[i * 6 + 1]; data[b + 6] = cov[i * 6 + 2]; data[b + 7] = cov[i * 6 + 3];
-    data[b + 8] = cov[i * 6 + 4]; data[b + 9] = cov[i * 6 + 5]; data[b + 10] = colors[i * 4] / 255; data[b + 11] = colors[i * 4 + 1] / 255;
-    data[b + 12] = colors[i * 4 + 2] / 255;
-  }
-  o.dataTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, o.dataTex);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, rows);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, rows, gl.RGBA, gl.FLOAT, data);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  o.dataTex = splatDataTexture(n, centers, cov, colors);
   o.vao = gl.createVertexArray();
   gl.bindVertexArray(o.vao);
   o.idxBuf = gl.createBuffer();
@@ -8269,6 +8267,25 @@ function createSplatModel(name, n, centers, cov, colors, maxScale, sh, K) {
   o.dep = new Float32Array(n);
   o.color = [1, 1, 1];
   return o;
+}
+function splatDataTexture(n, centers, cov, colors) {
+  const W = 4096, rows = Math.ceil(n * 4 / W);
+  if (rows > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('Too many splats for this GPU');
+  const data = new Float32Array(W * rows * 4);
+  for (let i = 0; i < n; i++) {
+    const b = i * 16;
+    data[b] = centers[i * 3]; data[b + 1] = centers[i * 3 + 1]; data[b + 2] = centers[i * 3 + 2]; data[b + 3] = colors[i * 4 + 3] / 255;
+    data[b + 4] = cov[i * 6]; data[b + 5] = cov[i * 6 + 1]; data[b + 6] = cov[i * 6 + 2]; data[b + 7] = cov[i * 6 + 3];
+    data[b + 8] = cov[i * 6 + 4]; data[b + 9] = cov[i * 6 + 5]; data[b + 10] = colors[i * 4] / 255; data[b + 11] = colors[i * 4 + 1] / 255;
+    data[b + 12] = colors[i * 4 + 2] / 255;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, rows);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, rows, gl.RGBA, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  return tex;
 }
 function covFrom(scale, q, out, off) {
   const [w, x, y, z] = q;
@@ -8339,6 +8356,32 @@ function sortSplats(o, ci) {
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, o.order);
 }
 const glowMixOf = (o) => (o.glowMix != null ? o.glowMix : o.glowCol ? 1 : 0);
+const splatLens = { enabled: false, inside: false, x: 0.5, y: 0.5, diameterMm: 100, tiltX: 0, tiltY: 0, ring: null };
+function lensCircle(tgt, ci) {
+  // Physical diameter at the camera's target plane, in the volume's normalized
+  // world coordinates. Use render-target pixels (not CSS/device pixels).
+  const depth = Math.max(NEAR, dot3(sub(cam.target, ci.eye), ci.f));
+  const radius = splatLens.diameterMm / (volume.maxExt || 1) * tgt.h / (4 * ci.tan * depth);
+  return [splatLens.x * tgt.w, (1 - splatLens.y) * tgt.h, radius];
+}
+function lensTunnel(ci) {
+  // Pivot at the camera-facing plane of the CT bounds. The aperture stays at
+  // the cursor; deeper cross-sections move along the tilted projection axis.
+  const M = volume.M;
+  const halfDepth = 0.5 * (Math.abs(dot3([M[0], M[3], M[6]], ci.f))
+    + Math.abs(dot3([M[1], M[4], M[7]], ci.f)) + Math.abs(dot3([M[2], M[5], M[8]], ci.f)));
+  const entrance = Math.max(NEAR, -dot3(ci.eye, ci.f) - halfDepth);
+  const degrees = Math.hypot(splatLens.tiltX, splatLens.tiltY);
+  if (!degrees) return [0, 0, entrance];
+  const off = ci.off || [0, 0];
+  const ray = norm([(2 * splatLens.x - 1) * ci.tan * ci.aspect + off[0],
+    (1 - 2 * splatLens.y) * ci.tan + off[1], 1]);
+  const right = norm([ray[2], 0, -ray[0]]), up = cross3(ray, right);
+  const a = degrees * Math.PI / 180, c = Math.cos(a), s = Math.sin(a) / degrees;
+  const axis = ray.map((v, i) => c * v + s * (splatLens.tiltX * right[i] + splatLens.tiltY * up[i]));
+  return [axis[0] / Math.max(axis[2], 1e-4) - ray[0] / ray[2],
+    axis[1] / Math.max(axis[2], 1e-4) - ray[1] / ray[2], entrance];
+}
 function drawSplats(tgt, ci, glowList) {
   const list = glowList || models.filter((m) => m.visible && m.kind === 'splat' && m.alpha > 0);
   if (!list.length || !splatProg) return;
@@ -8352,6 +8395,16 @@ function drawSplats(tgt, ci, glowList) {
   camUniforms(P, ci);
   gl.uniform2f(P.u('uViewport'), tgt.w, tgt.h);
   gl.uniform1i(P.u('uData'), 0);
+  const circle = lensCircle(tgt, ci);
+  gl.uniform3fv(P.u('uLensTunnel'), splatLens.enabled ? lensTunnel(ci) : [0, 0, 0]);
+  if (splatLens.ring && !ci.ov && !glowList) {
+    const rect = canvas.getBoundingClientRect(), radius = circle[2] * rect.height / tgt.h;
+    const ring = splatLens.ring;
+    ring.hidden = !splatLens.enabled || !splatLens.inside;
+    ring.style.left = (splatLens.x * rect.width) + 'px';
+    ring.style.top = (splatLens.y * rect.height) + 'px';
+    ring.style.width = ring.style.height = (radius * 2) + 'px';
+  }
   for (const o of list) {
     sortSplats(o, ci);
     const { m, t } = affineOf(o);
@@ -8371,6 +8424,11 @@ function drawSplats(tgt, ci, glowList) {
     gl.uniform1i(P.u('uSH'), 1);
     gl.uniform1i(P.u('uShDeg'), o.shTex ? o.shDeg : 0);
     gl.uniform1i(P.u('uShT'), o.shTex ? o.shT : 0);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, o.lensBoneTex || o.dataTex);
+    gl.uniform1i(P.u('uLensData'), 2);
+    gl.uniform1i(P.u('uLens'), splatLens.enabled && splatLens.inside && !!o.lensBoneTex ? 1 : 0);
+    gl.uniform3fv(P.u('uLensCircle'), circle);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, o.dataTex);
     gl.bindVertexArray(o.vao);
@@ -8382,7 +8440,7 @@ function drawSplats(tgt, ci, glowList) {
 }
 function disposeModel(o, keepTex) {
   if (o.kind === 'mesh') o.groups.forEach((g) => { gl.deleteVertexArray(g.vao); g.bufs.forEach((b) => gl.deleteBuffer(b)); if (g.tex && !keepTex) gl.deleteTexture(g.tex); });
-  else { gl.deleteVertexArray(o.vao); gl.deleteBuffer(o.idxBuf); gl.deleteTexture(o.dataTex); if (o.shTex) gl.deleteTexture(o.shTex); }
+  else { gl.deleteVertexArray(o.vao); gl.deleteBuffer(o.idxBuf); gl.deleteTexture(o.dataTex); if (o.shTex) gl.deleteTexture(o.shTex); if (o.lensBoneTex) gl.deleteTexture(o.lensBoneTex); }
 }
 const prUI = { step: 1, sstep: 1, frames: 64, size: 'x1', spl: { fine: 0, fmt: 'ply', tr: 0.6, join: 1, inset: true, haze: false, ak: 0.85, vol: true }, busy: false };
 function prInfoText() {
@@ -8699,7 +8757,7 @@ function sbUniforms(P, seed) {
 // Gaussians reproduce the same optical depth as the volume (see the paper, "opacity mapping").
 
 // minCell / maxCell / minCellLo (cell sizes in voxels), keepFrac, volBudget, visMin, strat.
-async function splatHazeGPU(progress) {
+async function splatHazeGPU(progress, pair = null) {
   // Optional range cache for the octree split test (prUI.spl.rangeCache): the volume is divided into 4^3-voxel tiles whose
   // HU minimum and maximum are computed once on first use; a query covering more than 512 voxels combines full tiles from the
   // cache and scans partial tiles exactly, so the result equals the direct scan. Contributed by W. Schweitzer; off by default,
@@ -8741,23 +8799,32 @@ async function splatHazeGPU(progress) {
   const budget = prUI.spl.volBudget || (mob ? 400000 : 2500000);
   const OM = vr.mode === 'dvr' ? null : volume.outMask;   // the DVR renderer does not use the outside-air mask, so neither does the conversion
   // opacity of the transfer function per HU, and a prefix count of "visible" HU values (to test a HU range in O(1))
-  const H0 = -1100, HN = 4400, vis = new Int32Array(HN + 1), aTab = new Float32Array(HN);
-  {
-    const pts = vr.pts || [[0, [1, 1, 1], 0], [1, [1, 1, 1], 0.8]];
+  const H0 = -1100, HN = 4400, vis = new Int32Array(HN + 1);
+  // A lens uses the union of visible HU ranges and refines boundaries in either
+  // look. Otherwise bone hidden by the surface could be missing from the bake.
+  const looks = pair ? pair.looks : [vr];
+  const tables = looks.map((look) => {
+    const aTab = new Float32Array(HN);
+    const pts = look.pts || [[0, [1, 1, 1], 0], [1, [1, 1, 1], 0.8]];
     const aAt = (h) => {
-      const x = (h - vr.lo) / Math.max(vr.hi - vr.lo, 1e-4); if (x <= 0) return 0;
+      const x = (h - look.lo) / Math.max(look.hi - look.lo, 1e-4); if (x <= 0) return 0;
       const xc = Math.min(x, 1); let k = 1; while (k < pts.length - 1 && pts[k][0] < xc) k++;
       const A = pts[k - 1], B = pts[k], t = clamp((xc - A[0]) / (B[0] - A[0] || 1), 0, 1);
-      return (A[2] + (B[2] - A[2]) * t) * (vr.dens ?? 1);
+      return (A[2] + (B[2] - A[2]) * t) * (look.dens ?? 1);
     };
-    for (let k = 0; k < HN; k++) { const a = aAt(H0 + k); aTab[k] = a; vis[k + 1] = vis[k] + (a > (prUI.spl.visMin ?? 0.003) ? 1 : 0); }
-  }
+    for (let k = 0; k < HN; k++) aTab[k] = aAt(H0 + k);
+    return aTab;
+  });
+  for (let k = 0; k < HN; k++) vis[k + 1] = vis[k] + (tables.some((t) => t[k] > (prUI.spl.visMin ?? 0.003)) ? 1 : 0);
   const visBetween = (lo, hi) => { const a = clamp(Math.floor(lo) - H0, 0, HN), b = clamp(Math.ceil(hi) - H0 + 1, 0, HN); return b > a && vis[b] - vis[a] > 0; };
   // maximum opacity inside a HU range (sparse table)
-  const rmq = [aTab];
-  for (let k = 1; (1 << k) <= HN; k++) { const prev = rmq[k - 1], cur = new Float32Array(HN - (1 << k) + 1); for (let i = 0; i < cur.length; i++) cur[i] = Math.max(prev[i], prev[i + (1 << (k - 1))]); rmq.push(cur); }
-  const aMaxIn = (lo, hi) => { const a = clamp(Math.floor(lo) - H0, 0, HN - 1), b = clamp(Math.ceil(hi) - H0, 0, HN - 1); if (b < a) return 0; const k = 31 - Math.clz32(b - a + 1); return Math.max(rmq[k][a], rmq[k][b - (1 << k) + 1]); };
-  const isEdge = (lo, hi) => { const am = aMaxIn(lo, hi), aEnds = Math.min(aTab[clamp(Math.round(lo) - H0, 0, HN - 1)], aTab[clamp(Math.round(hi) - H0, 0, HN - 1)]); return am > 0.01 && am - aEnds > 0.5 * am; };
+  const edgeTests = tables.map((aTab) => {
+    const rmq = [aTab];
+    for (let k = 1; (1 << k) <= HN; k++) { const prev = rmq[k - 1], cur = new Float32Array(HN - (1 << k) + 1); for (let i = 0; i < cur.length; i++) cur[i] = Math.max(prev[i], prev[i + (1 << (k - 1))]); rmq.push(cur); }
+    const aMaxIn = (lo, hi) => { const a = clamp(Math.floor(lo) - H0, 0, HN - 1), b = clamp(Math.ceil(hi) - H0, 0, HN - 1); if (b < a) return 0; const k = 31 - Math.clz32(b - a + 1); return Math.max(rmq[k][a], rmq[k][b - (1 << k) + 1]); };
+    return (lo, hi) => { const am = aMaxIn(lo, hi), aEnds = Math.min(aTab[clamp(Math.round(lo) - H0, 0, HN - 1)], aTab[clamp(Math.round(hi) - H0, 0, HN - 1)]); return am > 0.01 && am - aEnds > 0.5 * am; };
+  });
+  const isEdge = (lo, hi) => edgeTests.some((test) => test(lo, hi));
   const refineOn = prUI.spl.refine !== false, OCT = prUI.spl.octree !== false && refineOn;
   let c = Math.max(prUI.spl.volCell || 1, Math.round(Math.cbrt(nx * ny * nz / (budget * 6))));
   let cells, csz;
@@ -8770,7 +8837,8 @@ async function splatHazeGPU(progress) {
   // cells are cubes in millimetres: the size unit is the finest voxel spacing (an = anisotropy per axis)
   const uMm = Math.min(...sp), an = OCT && prUI.spl.mmCells !== false ? sp.map((v) => uMm / v) : [1, 1, 1];
   const rangeFn = (prUI.spl.rangeCache || window.__rangeCache) ? sbRangeIndex(V, OM, nx, ny, nz) : null;   // optional tile cache for the split test
-  for (let tries = 0; tries < 6; tries++) {
+  if (pair && pair.cells) { cells = pair.cells; csz = pair.csz; c = pair.cellSize; }
+  else for (let tries = 0; tries < 6; tries++) {
     cells = []; csz = [];
     if (OCT) {
       // adaptive octree: start from coarse cells and split (into 8) only where the opacity changes strongly inside the
@@ -8885,6 +8953,15 @@ async function splatHazeGPU(progress) {
     if (tk >= t0V) { keep.push(i); aKeep[i] = 1 - Math.exp(-tk); }
     else if (tk > 1e-5 && hash01(i) < tk / t0V) { keep.push(i); aKeep[i] = a0V; }
   }
+  if (pair && !pair.surface) {
+    pair.cells = cells; pair.csz = csz; pair.cellSize = c;
+    pair.surface = { acc, aKeep };
+    return { n }; // Retain every candidate until the bone pass has been baked.
+  }
+  if (pair) {
+    keep.length = 0;
+    for (let i = 0; i < n; i++) if (aKeep[i] > 0 || pair.surface.aKeep[i] > 0) keep.push(i);
+  }
   const m = keep.length;
   if (!m) return null;
   const map = makeCoordMap('yup'), t = new Float32Array(3), st0 = Math.min(...sp) / 1000;
@@ -8894,10 +8971,18 @@ async function splatHazeGPU(progress) {
     map(cells[i * 3] + 0.5, cells[i * 3 + 1] + 0.5, cells[i * 3 + 2] + 0.5, t, 0);
     B.pos.set(t, j * 3); B.nrm[j * 3 + 1] = 1;
     for (let k = 0; k < 3; k++) B.col[j * 4 + k] = Math.round(clamp(acc[i * 4 + k] / S, 0, 1) * 255);
-    B.col[j * 4 + 3] = Math.round(clamp(aKeep[i], 0.004, 0.99) * 255);
+    B.col[j * 4 + 3] = Math.round(clamp(aKeep[i], pair ? 0 : 0.004, 0.99) * 255);
     B.scl[j * 3] = B.scl[j * 3 + 1] = B.scl[j * 3 + 2] = st * 0.55;
     B.rot[j * 4] = 1;
   });
+  if (pair) {
+    B.bone = { ...B }; // Shared geometry, separately baked color and opacity.
+    B.col = new Uint8Array(m * 4);
+    keep.forEach((i, j) => {
+      for (let k = 0; k < 3; k++) B.col[j * 4 + k] = Math.round(clamp(pair.surface.acc[i * 4 + k] / S, 0, 1) * 255);
+      B.col[j * 4 + 3] = Math.round(clamp(pair.surface.aKeep[i], 0, 0.99) * 255);
+    });
+  }
   window.__splLast = { kept: m, cells: n, target: TGT, tgtLog, minCell: c, floor: lowCell };
   console.log('[splat] volume splats', m, 'of', n, 'target', TGT, JSON.stringify(tgtLog), 'cell', c);
   return B;
@@ -10632,7 +10717,7 @@ if (window.__STUDY || /[?&]study=1(&|$)/.test(location.search)) (() => {
 
 if (window.__DEMO) (() => {
   document.documentElement.classList.add('demo');
-  const D = { mode: 'std', look: 'dvrBone', splat: null, stale: false, vol: null, bakeMs: 0, busy: false, fps: '' };
+  const D = { mode: 'std', look: 'dvrBone', splat: null, lens: null, lensKey: '', stale: false, vol: null, bakeMs: 0, busy: false, fps: '' };
   const LOOKS = [['Bone', 'dvrBone'], ['Contrast vessels', 'dvrCta'], ['Skin & bone', 'dvrSoft']];
   const box = document.createElement('div');
   box.id = 'dmPanel'; box.setAttribute('translate', 'no');
@@ -10650,7 +10735,13 @@ if (window.__DEMO) (() => {
       <div class="dm-seg" role="group" aria-label="Rendering"><button type="button" data-m="std">Standard</button><button type="button" data-m="photo">Photoreal</button><button type="button" data-m="gs">3DGS</button></div>
       <div class="dm-row" style="margin-top:8px"><button type="button" id="dmFps">Measure FPS</button></div>
       <p class="dm-note" id="dmFpsNote"></p></section>
-    <section id="dmS5"><h2><i>5</i>Export</h2><div class="dm-row"><button type="button" id="dmPly">Save .ply</button><button type="button" id="dmSpz">Save .spz (smaller)</button></div>
+    <section id="dmS5"><h2><i>5</i>Lens mode</h2>
+      <button type="button" id="dmLens" aria-pressed="false">Enable lens mode</button>
+      <button type="button" id="dmLensReset">Reset tilt</button>
+      <p class="dm-note">Bone inside the lens tunnel; Skin &amp; bone outside. PgUp enlarges, PgDn shrinks. Arrow keys tilt the tunnel 1° per press, up to 30° total. Other controls work as usual.</p>
+      <p class="dm-note" id="dmLensTilt"></p>
+      <p class="dm-note" id="dmLensNote">Diameter: 10 cm at the view center. Both looks are baked once on first use.</p></section>
+    <section id="dmS6"><h2><i>6</i>Export</h2><div class="dm-row"><button type="button" id="dmPly">Save .ply</button><button type="button" id="dmSpz">Save .spz (smaller)</button></div>
       <p class="dm-note">Opens in standard 3DGS viewers.</p></section>
     <p class="dm-foot">For research and education only. Not for diagnosis or treatment decisions.</p>`;
   document.body.appendChild(box);
@@ -10658,6 +10749,8 @@ if (window.__DEMO) (() => {
   const hint = document.createElement('div'); hint.id = 'dmHint'; hint.setAttribute('translate', 'no');
   hint.innerHTML = '<div><b>Open a CT to start</b>DICOM or NIfTI, or try the sample CT.</div>'; document.body.appendChild(hint);
   const q = (id) => document.getElementById(id);
+  const ring = document.createElement('div'); ring.id = 'dmLensRing'; ring.hidden = true;
+  ring.setAttribute('aria-hidden', 'true'); $('pane3d').appendChild(ring); splatLens.ring = ring;
   LOOKS.forEach(([lb, id]) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = lb; b.dataset.look = id; q('dmLooks').appendChild(b); });
 
   const has = () => !!(volume && !volume.empty);
@@ -10666,15 +10759,18 @@ if (window.__DEMO) (() => {
   function setMode(m) {
     D.mode = m;
     if (m === 'photo') { setPhotoreal(true); pr.rt = true; } else setPhotoreal(false);
-    view.ctHide = m === 'gs';
+    view.ctHide = m === 'gs' || m === 'lens';
     if (splatOn()) D.splat.visible = m === 'gs';
+    if (D.lens) D.lens.visible = m === 'lens';
+    splatLens.enabled = m === 'lens';
+    ring.hidden = !splatLens.enabled || !splatLens.inside;
     requestDraw(false); sync();
   }
   function applyLook(id) {
     D.look = id; vrApplyPreset(id);
     q('dmWinNote').textContent = 'Right-drag in the view to adjust: left/right shifts which tissue shows, up/down widens or narrows it.';
     if (splatOn()) D.stale = true;
-    if (D.mode === 'gs') setMode('photo');
+    if (D.mode === 'gs' || D.mode === 'lens') setMode('photo');
     requestDraw(false); sync();
   }
   async function waitLight() {
@@ -10689,6 +10785,63 @@ if (window.__DEMO) (() => {
   }
 
   const kfKey = () => [vr.preset, vr.lo, vr.hi, vr.dens, JSON.stringify(vr.pts || null)].join('|');
+  function dropLens() {
+    if (D.lens) {
+      const i = models.indexOf(D.lens); if (i >= 0) models.splice(i, 1);
+      modelPool.delete(D.lens.id); disposeModel(D.lens); D.lens = null;
+      selModel = -1; renderModels();
+    }
+    D.lensKey = ''; splatLens.enabled = false; ring.hidden = true;
+  }
+  const lensKey = () => JSON.stringify([volume.id, prUI.spl, view.clip, view.laz, view.lel, view.amb, view.key, view.keyTone, view.rim, pr.soft]);
+  async function enableLens() {
+    if (!has() || D.busy || prUI.busy) return;
+    if (D.mode === 'lens') { setMode(splatOn() ? 'gs' : 'photo'); return; }
+    const key = lensKey();
+    if (D.lens && models.includes(D.lens) && D.lensKey === key) { setMode('lens'); return; }
+    const savedVR = { ...vr }, savedMode = D.mode, sourceVolume = volume;
+    let made = null, success = false;
+    D.busy = true; sync();
+    try {
+      setMode('photo'); prUI.busy = true;
+      const pair = { looks: ['dvrSoft', 'dvrBone'].map((id) => VR_PRESETS.find((p) => p.id === id)) };
+      let B;
+      for (const look of pair.looks) {
+        vrApplyPreset(look.id);
+        const label = look.id === 'dvrSoft' ? 'Skin & bone' : 'Bone';
+        showBusy(`Lens: preparing ${label} lighting…`); await frame();
+        // A preset changes occlusion as well as color: wait for its own lighting.
+        for (let g = 0; g < 3600 && (!lv.ready || lv.sig !== lvSigNow()); g++) {
+          if (lv.fail || volume !== sourceVolume) throw new Error('Lens lighting is unavailable');
+          await frame();
+        }
+        if (!lv.ready || lv.sig !== lvSigNow()) throw new Error('Lens lighting did not finish');
+        let lastUI = 0;
+        B = await splatHazeGPU(async (f) => {
+          if (volume !== sourceVolume) throw new Error('The CT changed during conversion');
+          if (performance.now() - lastUI > 120) { lastUI = performance.now(); showBusy(`Lens: baking ${label}… ${Math.round(f * 100)}%`); await tick(); }
+        }, pair);
+        if (!B || !B.n) throw new Error('Nothing visible to convert');
+      }
+      if (volume !== sourceVolume) throw new Error('The CT changed during conversion');
+      showBusy('Lens: storing both splat records…'); await tick();
+      if (volume !== sourceVolume) throw new Error('The CT changed during conversion');
+      made = splatFromBake(`${capBaseName()}_lens`, B);
+      made.lensBoneTex = splatDataTexture(B.n, made.centers, made.cov, B.bone.col);
+      made.baked = true; made.placement = 'yup'; made.visible = false;
+      // Keep both CPU records too, with shared positions/scales/rotations.
+      made.bakeData = B;
+      dropLens(); D.lens = made; D.lensKey = key; models.push(made);
+      renderModels(); success = true;
+    } catch (e) {
+      if (made && made !== D.lens) disposeModel(made);
+      console.error(e); histToast('Could not prepare lens mode: ' + (e.message || e), 5000);
+    } finally {
+      if (volume === sourceVolume) { Object.assign(vr, savedVR); vr._lutKey = ''; }
+      prUI.busy = false; D.busy = false; hideBusy();
+      setMode(success ? 'lens' : volume === sourceVolume ? savedMode : 'photo');
+    }
+  }
   async function bake() {
     if (!has() || D.busy || prUI.busy) return;
     D.busy = true; sync();
@@ -10737,7 +10890,8 @@ if (window.__DEMO) (() => {
   }
   function onLoaded() {
     try { setVC(false); } catch (e) { /* */ }
-    D.vol = volume; D.stale = false; D.fps = ''; dropSplat();
+    D.vol = volume; D.stale = false; D.fps = ''; dropSplat(); dropLens();
+    splatLens.diameterMm = 100; splatLens.inside = false; splatLens.tiltX = splatLens.tiltY = 0;
     view.layout = '3d'; view.max = null; applyLayout();
     try { setView('front'); } catch (e) { /* */ }
     D.look = 'dvrBone';
@@ -10746,8 +10900,14 @@ if (window.__DEMO) (() => {
   function sync() {
     const ok = has(), sp = splatOn(), busy = D.busy || prUI.busy;
     hint.hidden = ok || !$('busy').hidden;
-    ['dmS2', 'dmS3', 'dmS4', 'dmS5'].forEach((id) => q(id).classList.toggle('dm-off', !ok));
-    q('dmS5').classList.toggle('dm-off', !sp);
+    ['dmS2', 'dmS3', 'dmS4', 'dmS5', 'dmS6'].forEach((id) => q(id).classList.toggle('dm-off', !ok));
+    q('dmS6').classList.toggle('dm-off', !sp);
+    q('dmLens').disabled = busy || !ok || PERF.lite;
+    q('dmLens').setAttribute('aria-pressed', String(D.mode === 'lens'));
+    q('dmLens').textContent = D.mode === 'lens' ? 'Disable lens mode' : 'Enable lens mode';
+    q('dmLensReset').disabled = busy || !(splatLens.tiltX || splatLens.tiltY);
+    q('dmLensTilt').textContent = `Tilt: ${splatLens.tiltX}° right / ${splatLens.tiltY}° up (${Math.hypot(splatLens.tiltX, splatLens.tiltY).toFixed(1)}° total).`;
+    q('dmLensNote').textContent = `Diameter: ${(splatLens.diameterMm / 10).toFixed(1)} cm at the view center. ` + (D.lens ? `${D.lens.n.toLocaleString('en-US')} splats, two stored looks.` : 'Both looks are baked once on first use.');
     box.querySelectorAll('[data-look]').forEach((b) => b.setAttribute('aria-pressed', String(vr.on && vr.preset === b.dataset.look)));
     box.querySelectorAll('[data-m]').forEach((b) => { b.setAttribute('aria-pressed', String(D.mode === b.dataset.m)); b.disabled = busy || (b.dataset.m === 'gs' && !sp) || (b.dataset.m === 'photo' && PERF.lite); });
     box.querySelectorAll('[data-tgt]').forEach((b) => { b.setAttribute('aria-pressed', String(+b.dataset.tgt === prUI.spl.target)); b.disabled = busy; });
@@ -10764,6 +10924,33 @@ if (window.__DEMO) (() => {
   q('dmLooks').addEventListener('click', (e) => { const b = e.target.closest('[data-look]'); if (b && has()) applyLook(b.dataset.look); });
   box.querySelector('.dm-seg').addEventListener('click', (e) => { const b = e.target.closest('[data-m]'); if (b && !b.disabled) setMode(b.dataset.m); });
   q('dmFine').addEventListener('click', (e) => { const b = e.target.closest('[data-tgt]'); if (b && !b.disabled) { prUI.spl.target = +b.dataset.tgt; if (splatOn()) D.stale = true; sync(); } });
+  q('dmLens').addEventListener('click', enableLens);
+  q('dmLensReset').addEventListener('click', () => { splatLens.tiltX = splatLens.tiltY = 0; requestDraw(false); sync(); });
+  // Observe pointer movement without consuming the existing orbit/pan/window controls.
+  const moveLens = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    splatLens.x = (e.clientX - rect.left) / rect.width; splatLens.y = (e.clientY - rect.top) / rect.height;
+    splatLens.inside = splatLens.x >= 0 && splatLens.x <= 1 && splatLens.y >= 0 && splatLens.y <= 1;
+    if (splatLens.enabled) requestDraw(false);
+  };
+  canvas.addEventListener('pointermove', moveLens, true);
+  canvas.addEventListener('pointerenter', moveLens);
+  canvas.addEventListener('pointerleave', () => { splatLens.inside = false; ring.hidden = true; if (splatLens.enabled) requestDraw(false); });
+  window.addEventListener('blur', () => { splatLens.inside = false; ring.hidden = true; if (splatLens.enabled) requestDraw(false); });
+  document.addEventListener('keydown', (e) => {
+    if (!splatLens.enabled || e.altKey || e.ctrlKey || e.metaKey || !['PageUp', 'PageDown', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    if (e.target.isContentEditable || e.target.closest('input, textarea, select')) return;
+    e.preventDefault();
+    if (e.key === 'PageUp' || e.key === 'PageDown') {
+      splatLens.diameterMm = clamp(splatLens.diameterMm * (e.key === 'PageUp' ? 1.1 : 1 / 1.1), 5, 2000);
+    } else {
+      const x = splatLens.tiltX + (e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0);
+      const y = splatLens.tiltY + (e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0);
+      // Limit the combined tilt too, so diagonal input cannot exceed 30°.
+      if (Math.hypot(x, y) <= 30) { splatLens.tiltX = x; splatLens.tiltY = y; }
+    }
+    requestDraw(false); sync();
+  });
 
   {
     let dr = null;
@@ -10773,7 +10960,7 @@ if (window.__DEMO) (() => {
     cv.addEventListener('pointerdown', (e) => {
       if (!has() || D.busy || prUI.busy || !(e.button === 2 || (e.button === 0 && e.altKey))) return;
       e.preventDefault(); e.stopImmediatePropagation();
-      if (D.mode === 'gs') setMode('photo');
+      if (D.mode === 'gs' || D.mode === 'lens') setMode('photo');
       dr = { x: e.clientX, y: e.clientY, lo: vr.lo, hi: vr.hi, id: e.pointerId };
       try { cv.setPointerCapture(e.pointerId); } catch (er) { /* */ }
     }, true);
@@ -10820,6 +11007,7 @@ if (window.__DEMO) (() => {
         else t = prInfoText();
       }
       else if (D.mode === 'gs' && splatOn()) t = `3DGS · ${(D.splat.n || 0).toLocaleString('en-US')} splats · baked lighting (no light computation while viewing)`;
+      else if (D.mode === 'lens' && D.lens) t = `Lens · ${(splatLens.diameterMm / 10).toFixed(1)} cm · tilt ${Math.hypot(splatLens.tiltX, splatLens.tiltY).toFixed(1)}° · arrows to tilt · PgUp / PgDn to resize`;
       else if (D.mode === 'std') t = 'Standard rendering';
     }
     if (status.textContent !== t) status.textContent = t;
