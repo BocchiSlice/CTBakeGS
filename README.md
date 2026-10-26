@@ -23,6 +23,9 @@ Version 1.0 (2026-10-21)
 Open `CTBakeGS.html?study=1`, run the study on the six TotalSegmentator CTs, then run
 `evaluation/ctbakegs_tables_figures.py`. See [`evaluation/README.md`](evaluation/README.md).
 
+## Authors 
+Haruki Fukuda, Constantin Lux, Wolf Schweitzer, Tadashi Hosoya , Lars Ebert.
+
 ## License
 
 MIT (see `LICENSE`). Third-party components are listed in `THIRD_PARTY_NOTICES.md`.
