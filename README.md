@@ -15,6 +15,9 @@ Open `CTBakeGS.html` in a recent desktop Chrome or Edge, open a CT (DICOM or NIf
 On Windows, the first start can take about a minute while the browser prepares the GPU programs; later starts
 are fast.
 
+## Version
+Version 1.0 (2026-10-21)
+
 ## Reproducing the paper
 
 Open `CTBakeGS.html?study=1`, run the study on the six TotalSegmentator CTs, then run
